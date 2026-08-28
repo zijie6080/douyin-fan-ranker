@@ -21,6 +21,7 @@ import { PopupToBackground, PanelInfo } from '../lib/messages';
 import { Fan, ScanState, ScanStatus, RunMode, StopReason, DiagnosticEntry, DiagnosticReport } from '../lib/types';
 import { findFollowerPanelEl } from '../lib/panel';
 import { diagnosisText } from '../lib/diagnostic';
+import { FinalDiagnosisEngine, buildSummaryText } from '../lib/final-diagnostic';
 import {
   isDetachError,
   detachReasonLabel,
@@ -61,6 +62,10 @@ let timeline: DiagnosticEntry[] = [];
 const wantedRequests = new Set<string>(); // 命中路径、等待 body 的 requestId
 let responseResolvers: Array<() => void> = [];
 
+// 终局诊断引擎（仅 final 模式创建）
+let engine: FinalDiagnosisEngine | null = null;
+const reqUrlById = new Map<string, string>(); // requestId → 命中路径的请求 URL（final 模式）
+
 // ---------------- 工具 ----------------
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -72,6 +77,7 @@ function cdp<T = unknown>(method: string, params?: object): Promise<T> {
       if (err) {
         // 命令执行时会话断开 → 标记未附着，交由主循环触发重连（不当作普通失败）
         if (isDetachError(err.message)) attached = false;
+        if (engine) engine.onSendCommandError(method, err.message || '', Date.now());
         reject(new Error(err.message));
       } else {
         resolve(result as T);
@@ -146,11 +152,11 @@ const PROBE_EXPR = `(() => {
     }
     if (el) {
       const r = el.getBoundingClientRect();
-      return { found: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, scrollTop: el.scrollTop, strategy: strategy, verification: verification, accountName: accountName };
+      return { found: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, strategy: strategy, verification: verification, accountName: accountName };
     }
     // 3) 视口兜底：窗口中央发滚轮，滚动指针下方任意可滚区域（含 window 本身）
     const se = doc.scrollingElement || doc.documentElement;
-    return { found: true, rect: { x: vw / 2, y: vh / 2, width: vw, height: vh }, scrollTop: se ? se.scrollTop : 0, strategy: 'viewport', verification: verification, accountName: accountName };
+    return { found: true, rect: { x: vw / 2, y: vh / 2, width: vw, height: vh }, scrollTop: se ? se.scrollTop : 0, scrollHeight: se ? se.scrollHeight : 0, clientHeight: se ? se.clientHeight : vh, strategy: 'viewport', verification: verification, accountName: accountName };
   } catch (e) {
     return { found: false, error: String((e && e.message) || e) };
   }
@@ -223,7 +229,7 @@ function decodeBody(body: string, base64Encoded: boolean): string {
   }
 }
 
-async function handleResponseBody(text: string): Promise<void> {
+async function handleResponseBody(text: string, requestId?: string): Promise<void> {
   let json: unknown;
   try {
     json = JSON.parse(text);
@@ -244,7 +250,22 @@ async function handleResponseBody(text: string): Promise<void> {
   if (result.meta.maxTime !== undefined) lastMaxTime = result.meta.maxTime;
   if (result.meta.minTime !== undefined) lastMinTime = result.meta.minTime;
 
+  const rawUserCount = result.fans.length;
   const newFans: Fan[] = store.upsertManyReturningNew(result.fans);
+
+  // 终局诊断：把解析结果（含 raw / newUnique 区分）喂给引擎
+  if (engine && requestId) {
+    engine.onParsed(requestId, {
+      rawUserCount,
+      newUniqueUserCount: newFans.length,
+      hasMore: result.meta.hasMore ?? null,
+      maxTime: result.meta.maxTime ?? null,
+      minTime: result.meta.minTime ?? null,
+      realFansCount: result.meta.realFansCount ?? null,
+      uniqueFanCountAfter: store.size,
+      now: Date.now(),
+    });
+  }
 
   // 记录诊断快照（每捕获一次响应一条）
   timeline.push({
@@ -279,20 +300,42 @@ function onDebuggerEvent(
   params?: unknown,
 ): void {
   if (source.tabId !== tabId || !scanning) return;
-  const p = params as { requestId?: string; response?: { url?: string } };
+  const p = params as {
+    requestId?: string;
+    request?: { url?: string };
+    response?: { url?: string; status?: number };
+    encodedDataLength?: number;
+    errorText?: string;
+  };
+  const now = Date.now();
 
-  if (method === 'Network.responseReceived') {
+  if (method === 'Network.requestWillBeSent') {
+    // 终局诊断：命中路径的请求一发出就记录（含分页游标）
+    const url = p.request?.url || '';
+    if (p.requestId && url.includes(SCAN_CONFIG.FOLLOWER_LIST_PATH)) {
+      reqUrlById.set(p.requestId, url);
+      if (engine) engine.onRequest(p.requestId, url, now);
+    }
+  } else if (method === 'Network.responseReceived') {
     const url = p.response?.url || '';
     if (p.requestId && url.includes(SCAN_CONFIG.FOLLOWER_LIST_PATH)) {
       wantedRequests.add(p.requestId);
+      if (engine) engine.onResponse(p.requestId, p.response?.status ?? 0, now);
     }
   } else if (method === 'Network.loadingFinished') {
     const id = p.requestId;
     if (id && wantedRequests.has(id)) {
       wantedRequests.delete(id);
+      if (engine) engine.onLoadingFinished(id, now, p.encodedDataLength ?? null);
       cdp<{ body: string; base64Encoded: boolean }>('Network.getResponseBody', { requestId: id })
-        .then((res) => handleResponseBody(decodeBody(res.body, res.base64Encoded)))
+        .then((res) => handleResponseBody(decodeBody(res.body, res.base64Encoded), id))
         .catch(() => undefined); // body 可能已被清除，忽略
+    }
+  } else if (method === 'Network.loadingFailed') {
+    const id = p.requestId;
+    if (id && (reqUrlById.has(id) || wantedRequests.has(id))) {
+      wantedRequests.delete(id);
+      if (engine) engine.onLoadingFailed(id, now, p.errorText || 'loading failed');
     }
   }
 }
@@ -391,12 +434,14 @@ async function reconnect(): Promise<boolean> {
       firstInteraction = true; // 重新用移动+点击激活滚动
       lastProbeError = '';
       reconnecting = false;
+      if (engine) engine.onReconnect(Date.now(), true);
       message = '调试连接已恢复，继续扫描……';
       broadcast();
       return true;
     }
   }
   reconnecting = false;
+  if (engine) engine.onReconnect(Date.now(), false);
   return false;
 }
 
@@ -480,6 +525,86 @@ async function scanLoop(): Promise<void> {
   if (scanning) return finalize('stopped', '达到最大滚动保护上限，已停止', 'max_rounds');
 }
 
+// ---------------- 终局诊断主循环 ----------------
+async function finalLoop(): Promise<void> {
+  const eng = engine as FinalDiagnosisEngine;
+  let lastGrowthCount = store.size;
+  let lastGrowthAt = Date.now();
+
+  for (let round = 0; scanning && round < SCAN_CONFIG.MAX_WHEEL_ROUNDS; round += 1) {
+    if (!attached) {
+      const ok = await reconnect();
+      if (!ok) return finalize('stopped', '调试连接断开且多次重连失败（已生成诊断）', 'debugger_detached');
+      continue;
+    }
+    if (hasMore === false) return finalize('completed', '抖音返回 has_more=false（已生成诊断）', 'has_more_false');
+    if (realFansCount !== null && store.size >= realFansCount) {
+      return finalize('completed', '已收集到全部粉丝（已生成诊断）', 'reached_real_fans_count');
+    }
+
+    const before = await getPanel();
+    if (!attached) continue;
+    if (before?.verification) {
+      eng.onSecurity(before.verification, Date.now());
+      return finalize('error', `检测到疑似安全验证（${before.verification}），已停止（已生成诊断）`, 'verification');
+    }
+
+    // 增长追踪
+    if (store.size > lastGrowthCount) {
+      lastGrowthCount = store.size;
+      lastGrowthAt = Date.now();
+      if (eng.stallStartedAt !== null) eng.clearStall();
+    }
+
+    const now = Date.now();
+    if (now - lastGrowthAt >= SCAN_CONFIG.STALL_ENTER_MS && eng.stallStartedAt === null) {
+      eng.markStallStart(now);
+      message = '进入卡住诊断（STALL_DIAGNOSIS_MODE），持续观察约 45 秒……';
+      broadcast();
+    }
+    if (eng.stallStartedAt !== null && now - eng.stallStartedAt >= SCAN_CONFIG.STALL_WINDOW_MS) {
+      return finalize('stopped', '卡住诊断窗口结束（已生成诊断）', 'no_new_data_after_retries');
+    }
+
+    // 滚轮 + 记录滚动层前后状态
+    const rect = before?.rect;
+    if (rect) {
+      const stB = before?.scrollTop ?? 0;
+      const shB = before?.scrollHeight ?? 0;
+      const ch = before?.clientHeight ?? 0;
+      await dispatchWheel(rect);
+      if (!attached) continue;
+      const after = await getPanel();
+      const stA = after?.scrollTop ?? stB;
+      const shA = after?.scrollHeight ?? shB;
+      eng.onWheel({
+        timestamp: Date.now(),
+        mouseX: Math.round(rect.x + rect.width * SCAN_CONFIG.WHEEL_POINT_X_RATIO),
+        mouseY: Math.round(rect.y + rect.height * SCAN_CONFIG.WHEEL_POINT_Y_RATIO),
+        deltaY: SCAN_CONFIG.WHEEL_DELTA,
+        scrollTopBefore: stB,
+        scrollTopAfter: stA,
+        scrollHeightBefore: shB,
+        scrollHeightAfter: shA,
+        clientHeight: ch,
+        followerPanelFound: !!before?.found,
+        remainingScroll: shA - stA - ch,
+      });
+    }
+
+    const inStall = eng.stallStartedAt !== null;
+    const got = await waitForResponse(inStall ? SCAN_CONFIG.RECOVERY_WAIT_MS : SCAN_CONFIG.RESPONSE_WAIT_MS);
+    if (!attached) continue;
+    if (got) {
+      await delay(SCAN_CONFIG.POST_RESPONSE_DELAY_MS);
+    } else {
+      await jsScrollPanel();
+      await waitForResponse(SCAN_CONFIG.RESPONSE_WAIT_MS);
+    }
+  }
+  if (scanning) return finalize('stopped', '达到最大滚动保护上限（已生成诊断）', 'max_rounds');
+}
+
 // ---------------- 生命周期 ----------------
 async function beginScan(id: number, runMode: RunMode): Promise<void> {
   if (scanning) return;
@@ -505,6 +630,8 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   reconnectTotal = 0;
   wantedRequests.clear();
   responseResolvers = [];
+  reqUrlById.clear();
+  engine = runMode === 'final' ? new FinalDiagnosisEngine() : null;
 
   // 断点续扫：载入已有数据去重
   try {
@@ -529,7 +656,8 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
 
   scanning = true;
   broadcast();
-  void scanLoop();
+  if (runMode === 'final') void finalLoop();
+  else void scanLoop();
 }
 
 async function detachDebugger(): Promise<void> {
@@ -553,12 +681,44 @@ async function finalize(status: ScanStatus, msg: string, reason: StopReason): Pr
   if (lastProbeError) message += `｜探测报错:${lastProbeError}`;
   await detachDebugger();
 
-  if (mode === 'diagnose') {
+  if (mode === 'final') {
+    await finalizeFinal(reason);
+  } else if (mode === 'diagnose') {
     await finalizeDiagnose(reason);
   } else {
     await finalizeScan();
   }
   broadcast();
+}
+
+/** 终局诊断：生成并下载 3 个文件（json / summary.txt / events.jsonl），给出分类结论 */
+async function finalizeFinal(reason: StopReason): Promise<void> {
+  const eng = engine;
+  if (!eng) return;
+  if (eng.stoppedAt === null) eng.markStop(Date.now(), reason === 'user_stopped');
+  const report = eng.buildReport();
+  const summary = buildSummaryText(report);
+  const jsonl = eng.buildEventsJsonl();
+  diagnosis = `最终判断：${report.classification}（置信度 ${report.confidence}）\n` + report.reasoning.join('\n');
+
+  const stamp = fileStamp();
+  try {
+    await triggerDownload(
+      `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(report, null, 2))}`,
+      `抖音终局诊断_${stamp}.json`,
+    );
+    await triggerDownload(
+      `data:text/plain;charset=utf-8,${encodeURIComponent(summary)}`,
+      `抖音终局诊断摘要_${stamp}.txt`,
+    );
+    await triggerDownload(
+      `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(jsonl)}`,
+      `抖音终局诊断事件_${stamp}.jsonl`,
+    );
+    message += `｜终局诊断：${report.classification}`;
+  } catch (e) {
+    message += `｜诊断文件下载失败：${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 /** 诊断模式：只生成并下载 diagnostic.json，并给出人类可读结论 */
@@ -641,6 +801,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId !== tabId) return;
   attached = false;
   detachReason = String(reason || '');
+  if (engine) engine.onDetach(detachReason, Date.now());
   // 扫描中：不立即停止，交给主循环触发自动重连（区分于 no_new_data）
   if (scanning) {
     message = `调试连接已断开（${detachReasonLabel(detachReason)}），正在恢复……`;

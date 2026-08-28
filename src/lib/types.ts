@@ -42,8 +42,8 @@ export interface FansSnapshot {
   fans: Fan[];
 }
 
-/** 运行模式：正常扫描导出 Excel / 全自动分页诊断 */
-export type RunMode = 'scan' | 'diagnose';
+/** 运行模式：正常扫描导出 Excel / 全自动分页诊断 / 终局诊断 */
+export type RunMode = 'scan' | 'diagnose' | 'final';
 
 /** 扫描状态机 */
 export type ScanStatus = 'idle' | 'scanning' | 'completed' | 'stopped' | 'error';

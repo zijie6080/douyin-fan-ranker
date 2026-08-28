@@ -32,6 +32,12 @@ export const SCAN_CONFIG = {
 
   /** 单次扫描的最大滚轮轮次保护，避免异常情况下无限循环 */
   MAX_WHEEL_ROUNDS: 5000,
+
+  // ------- 终局诊断（final 模式）-------
+  /** 多久没有新增 unique 粉丝就进入 STALL_DIAGNOSIS_MODE（毫秒） */
+  STALL_ENTER_MS: 6000,
+  /** 进入 stall 后持续诊断观察的时间窗口（毫秒） */
+  STALL_WINDOW_MS: 45000,
 } as const;
 
 /**

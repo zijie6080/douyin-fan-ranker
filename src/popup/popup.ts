@@ -20,6 +20,7 @@ const el = {
   hint: $('hint'),
   start: $<HTMLButtonElement>('start'),
   diagnose: $<HTMLButtonElement>('diagnose'),
+  final: $<HTMLButtonElement>('final'),
   stop: $<HTMLButtonElement>('stop'),
   message: $('message'),
   diag: $('diag'),
@@ -62,9 +63,10 @@ function render(state: ScanState): void {
   const scanning = state.status === 'scanning';
   el.start.classList.toggle('hidden', scanning);
   el.diagnose.classList.toggle('hidden', scanning);
+  el.final.classList.toggle('hidden', scanning);
   el.stop.classList.toggle('hidden', !scanning);
 
-  const diagnoseMode = state.mode === 'diagnose';
+  const diagnoseMode = state.mode === 'diagnose' || state.mode === 'final';
   if (scanning) {
     const cap = `已捕获接口 ${state.capturedResponses} 次`;
     el.hint.textContent = diagnoseMode
@@ -101,6 +103,7 @@ function render(state: ScanState): void {
 
   el.start.disabled = !tabIsDouyin;
   el.diagnose.disabled = !tabIsDouyin;
+  el.final.disabled = !tabIsDouyin;
 }
 
 async function init(): Promise<void> {
@@ -118,6 +121,7 @@ async function startWithMode(mode: RunMode): Promise<void> {
   if (currentTabId === null) return;
   el.start.disabled = true;
   el.diagnose.disabled = true;
+  el.final.disabled = true;
   el.diag.classList.add('hidden');
   const state = await send({ type: 'START_SCAN', tabId: currentTabId, mode });
   if (state) render(state);
@@ -125,6 +129,7 @@ async function startWithMode(mode: RunMode): Promise<void> {
 
 el.start.addEventListener('click', () => startWithMode('scan'));
 el.diagnose.addEventListener('click', () => startWithMode('diagnose'));
+el.final.addEventListener('click', () => startWithMode('final'));
 
 el.stop.addEventListener('click', async () => {
   const state = await send({ type: 'STOP_SCAN' });

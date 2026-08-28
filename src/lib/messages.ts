@@ -26,6 +26,9 @@ export interface PanelInfo {
   rect?: { x: number; y: number; width: number; height: number };
   /** 面板当前 scrollTop（用于恢复时判断是否真的在滚动） */
   scrollTop?: number;
+  /** 面板 scrollHeight / clientHeight（终局诊断记录滚动层状态用） */
+  scrollHeight?: number;
+  clientHeight?: number;
   /** 命中的疑似验证关键词（无则 undefined） */
   verification?: string;
   /** 尝试读取到的账号昵称 */
