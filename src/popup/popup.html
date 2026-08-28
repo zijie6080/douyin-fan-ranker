@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>抖音高价值粉丝</title>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>抖音高价值粉丝</h1>
+
+      <div id="account" class="muted hidden"></div>
+
+      <div class="stat-grid">
+        <div class="stat"><span class="label">总粉丝</span><span id="total" class="value">—</span></div>
+        <div class="stat"><span class="label">已扫描</span><span id="collected" class="value">0</span></div>
+        <div class="stat"><span class="label">进度</span><span id="progress" class="value">0%</span></div>
+      </div>
+
+      <div id="bar"><div id="bar-fill"></div></div>
+
+      <div id="top" class="top hidden">
+        <span class="label">当前最高</span>
+        <div class="top-body"><span id="top-name">—</span><span id="top-count" class="muted"></span></div>
+      </div>
+
+      <div id="hint" class="hint">请在抖音打开自己的「粉丝」列表后再开始。</div>
+
+      <button id="start" class="btn primary">开始扫描全部粉丝</button>
+      <button id="stop" class="btn danger hidden">停止并保存</button>
+
+      <div id="message" class="message hidden"></div>
+
+      <div class="foot muted">数据仅保存在你本机浏览器，不上传任何服务器。</div>
+    </div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

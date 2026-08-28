@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "抖音高价值粉丝 (Douyin Fan Ranker)",
+  "version": "0.2.0",
+  "description": "在你日常使用、已登录抖音的 Chrome 里，扫描自己的全部粉丝并按其粉丝数从高到低导出 Excel。数据仅存本地。",
+  "default_locale": "zh_CN",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "抖音高价值粉丝",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.douyin.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["debugger", "activeTab", "downloads"],
+  "host_permissions": ["*://*.douyin.com/*"]
+}

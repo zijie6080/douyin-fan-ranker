@@ -1,0 +1,53 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --primary: #fe2c55;
+  --primary-fg: #ffffff;
+  --danger: #b91c1c;
+  --track: #f0f0f2;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+.wrap { width: 320px; padding: 16px; }
+h1 { font-size: 16px; margin: 0 0 10px; }
+.muted { color: var(--muted); font-size: 12px; }
+.hidden { display: none !important; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0; }
+.stat { background: var(--track); border-radius: 8px; padding: 8px; text-align: center; }
+.stat .label { display: block; font-size: 11px; color: var(--muted); }
+.stat .value { display: block; font-size: 16px; font-weight: 700; margin-top: 2px; }
+
+#bar { height: 6px; background: var(--track); border-radius: 999px; overflow: hidden; margin: 8px 0; }
+#bar-fill { height: 100%; width: 0%; background: var(--primary); transition: width 0.3s ease; }
+
+.top { background: var(--track); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+.top .label { font-size: 11px; color: var(--muted); }
+.top-body { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+#top-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hint { font-size: 12px; color: var(--muted); margin: 8px 0; }
+
+.btn {
+  width: 100%; padding: 10px 12px; border: 0; border-radius: 8px;
+  font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px;
+}
+.btn.primary { background: var(--primary); color: var(--primary-fg); }
+.btn.primary:disabled { background: #f6a6b5; cursor: not-allowed; }
+.btn.danger { background: #fff; color: var(--danger); border: 1px solid var(--danger); }
+
+.message { font-size: 12px; margin-top: 10px; padding: 8px; border-radius: 8px; background: #fff7ed; color: #9a3412; }
+.foot { margin-top: 12px; text-align: center; }
+
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1c1c1e; --fg: #f2f2f7; --muted: #9ca3af; --line: #2c2c2e; --track: #2c2c2e; }
+  .btn.danger { background: #1c1c1e; }
+  .message { background: #3a2a12; color: #fbbf77; }
+}

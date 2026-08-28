@@ -1,28 +1,30 @@
 {
   "name": "douyin-fan-ranker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "本地运行的抖音粉丝分析原型：监听浏览器已产生的粉丝列表 Response，去重并按粉丝数排序，导出 CSV / JSON。",
-  "type": "commonjs",
+  "description": "Chrome 扩展（MV3）：在用户已登录抖音的浏览器里扫描全部粉丝，按粉丝数降序导出 Excel。数据仅存本地。",
+  "type": "module",
   "scripts": {
-    "start": "ts-node src/index.ts",
-    "reset-login": "ts-node src/index.ts --reset-login",
-    "build": "tsc -p tsconfig.json",
+    "icons": "node scripts/make-icons.mjs",
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\""
   },
   "dependencies": {
-    "playwright": "^1.47.2"
+    "exceljs": "^4.4.0"
   },
   "devDependencies": {
+    "@types/chrome": "^0.0.270",
     "@types/node": "^20.14.10",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
     "@typescript-eslint/parser": "^7.16.0",
+    "esbuild": "^0.23.0",
     "eslint": "^8.57.0",
+    "fake-indexeddb": "^6.0.0",
     "jsdom": "^24.1.0",
-    "ts-node": "^10.9.2",
     "typescript": "^5.5.3",
     "vitest": "^2.0.5"
   },

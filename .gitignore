@@ -1,20 +1,13 @@
 # dependencies
 node_modules/
 
-# build output
+# 构建产物（可加载的未打包扩展，由 npm run build 生成）
 dist/
-
-# 浏览器 profile（包含登录会话，绝不提交）
-.browser-profile/
-.browser-profile-chromium/
-.browser-profile*/
-
-# 抓取结果（可能含个人数据，默认不提交）
-output/*.json
-output/*.csv
 
 # 日志与临时文件
 *.log
 npm-debug.log*
 .DS_Store
 Thumbs.db
+_*.ts
+_*.js
