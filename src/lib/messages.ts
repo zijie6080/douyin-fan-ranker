@@ -30,4 +30,8 @@ export interface PanelInfo {
   verification?: string;
   /** 尝试读取到的账号昵称 */
   accountName?: string;
+  /** 面板识别所用策略：strict/loose/viewport */
+  strategy?: 'strict' | 'loose' | 'viewport';
+  /** 探测报错（page 内 evaluate 抛错时） */
+  error?: string;
 }

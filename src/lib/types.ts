@@ -81,6 +81,10 @@ export interface DiagnosticReport {
   stopReason: StopReason;
   generatedAt: string;
   timeline: DiagnosticEntry[];
+  /** 面板识别最后所用策略（strict/loose/viewport），用于排查 */
+  probeStrategy?: string;
+  /** 面板探测报错（若有） */
+  probeError?: string;
 }
 
 /** 广播给 popup 的实时扫描状态 */

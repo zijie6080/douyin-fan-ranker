@@ -3,7 +3,7 @@
  * jsdom 不做真实布局，这里手工给元素打尺寸，模拟“内部可滚动的粉丝弹窗”。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { findFollowerPanelEl } from '../src/lib/panel';
+import { findFollowerPanelEl, findLooseScrollable, probePanel } from '../src/lib/panel';
 
 function stamp(el: HTMLElement, o: { clientHeight: number; scrollHeight: number; width?: number }): void {
   Object.defineProperty(el, 'clientHeight', { value: o.clientHeight, configurable: true });
@@ -42,5 +42,39 @@ describe('findFollowerPanelEl', () => {
   it('没有可滚动容器返回 null', () => {
     document.body.innerHTML = `<div style="overflow:hidden;">静态</div>`;
     expect(findFollowerPanelEl(document, window)).toBeNull();
+  });
+});
+
+describe('findLooseScrollable / probePanel 兜底', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('宽松查找：即使没有 overflow 样式，只要有滚动余量也能命中', () => {
+    document.body.innerHTML = `<div id="list"><div>内容</div></div>`;
+    const list = document.getElementById('list') as HTMLElement;
+    stamp(list, { clientHeight: 400, scrollHeight: 3000 });
+    // 严格版（要求 overflow 样式）找不到，宽松版应命中
+    expect(findFollowerPanelEl(document, window)).toBeNull();
+    expect(findLooseScrollable(document, window)).toBe(list);
+    const p = probePanel(document, window);
+    expect(p.found).toBe(true);
+    expect(p.strategy).toBe('loose');
+  });
+
+  it('probePanel：什么都找不到时退回视口兜底（strategy=viewport, found=true）', () => {
+    document.body.innerHTML = `<div>静态内容</div>`;
+    const p = probePanel(document, window);
+    expect(p.found).toBe(true);
+    expect(p.strategy).toBe('viewport');
+    expect(p.rect!.width).toBeGreaterThan(0);
+    expect(p.rect!.height).toBeGreaterThan(0);
+  });
+
+  it('probePanel：有严格面板时优先 strict', () => {
+    document.body.innerHTML = `<div id="m" style="overflow-y:auto;"><button>回关</button></div>`;
+    const m = document.getElementById('m') as HTMLElement;
+    stamp(m, { clientHeight: 400, scrollHeight: 3000 });
+    expect(probePanel(document, window).strategy).toBe('strict');
   });
 });

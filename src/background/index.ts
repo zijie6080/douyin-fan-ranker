@@ -66,32 +66,75 @@ function cdp<T = unknown>(method: string, params?: object): Promise<T> {
  * （避免“先开页面后装扩展、未刷新导致内容脚本缺失”这一常见失效）。
  */
 const PROBE_EXPR = `(() => {
-  const findFollowerPanelEl = ${findFollowerPanelEl.toString()};
-  const KWS = ${JSON.stringify(VERIFICATION_KEYWORDS)};
-  const text = (document.body && document.body.innerText) || '';
-  let verification;
-  for (const k of KWS) { if (text.indexOf(k) >= 0) { verification = k; break; } }
-  let accountName;
   try {
-    const h1 = document.querySelector('h1');
-    const t = ((h1 && h1.textContent) || '').trim();
-    if (t && t.length <= 30) accountName = t;
-    else { const ti = (document.title || '').replace(/[-|].*$/, '').trim(); accountName = ti || undefined; }
-  } catch (e) { /* ignore */ }
-  const el = findFollowerPanelEl(document, window, 250);
-  if (!el) return { found: false, verification: verification, accountName: accountName };
-  const r = el.getBoundingClientRect();
-  return { found: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, scrollTop: el.scrollTop, verification: verification, accountName: accountName };
+    const findFollowerPanelEl = ${findFollowerPanelEl.toString()};
+    const doc = document, win = window;
+    const KWS = ${JSON.stringify(VERIFICATION_KEYWORDS)};
+    const text = (doc.body && doc.body.innerText) || '';
+    let verification;
+    for (const k of KWS) { if (text.indexOf(k) >= 0) { verification = k; break; } }
+    let accountName;
+    try {
+      const h1 = doc.querySelector('h1');
+      const t = ((h1 && h1.textContent) || '').trim();
+      if (t && t.length <= 30) accountName = t;
+      else { const ti = (doc.title || '').replace(/[-|].*$/, '').trim(); accountName = ti || undefined; }
+    } catch (e) { /* ignore */ }
+    const vw = win.innerWidth || doc.documentElement.clientWidth || 1024;
+    const vh = win.innerHeight || doc.documentElement.clientHeight || 768;
+    // 1) 严格识别
+    let el = findFollowerPanelEl(doc, win, 250);
+    let strategy = 'strict';
+    // 2) 宽松：不强求 overflow 样式，取可滚动余量最大、可见、在视口内的大块
+    if (!el) {
+      strategy = 'loose';
+      let best = null, bestScore = 0;
+      const list = doc.querySelectorAll('div, ul, section, main');
+      for (let i = 0; i < list.length; i++) {
+        const e2 = list[i];
+        const overflow = e2.scrollHeight - e2.clientHeight;
+        if (overflow <= 20 || e2.clientHeight < 100) continue;
+        const r2 = e2.getBoundingClientRect();
+        if (r2.width < 120 || r2.height < 120) continue;
+        if (r2.bottom <= 0 || r2.top >= vh || r2.right <= 0 || r2.left >= vw) continue;
+        const st = win.getComputedStyle(e2);
+        if (st.display === 'none' || st.visibility === 'hidden') continue;
+        const s2 = overflow + r2.width * r2.height * 0.0005;
+        if (s2 > bestScore) { bestScore = s2; best = e2; }
+      }
+      el = best;
+    }
+    if (el) {
+      const r = el.getBoundingClientRect();
+      return { found: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, scrollTop: el.scrollTop, strategy: strategy, verification: verification, accountName: accountName };
+    }
+    // 3) 视口兜底：窗口中央发滚轮，滚动指针下方任意可滚区域（含 window 本身）
+    const se = doc.scrollingElement || doc.documentElement;
+    return { found: true, rect: { x: vw / 2, y: vh / 2, width: vw, height: vh }, scrollTop: se ? se.scrollTop : 0, strategy: 'viewport', verification: verification, accountName: accountName };
+  } catch (e) {
+    return { found: false, error: String((e && e.message) || e) };
+  }
 })()`;
+
+let lastProbeError = '';
+let lastStrategy = '';
 
 async function getPanel(): Promise<PanelInfo | undefined> {
   try {
-    const res = await cdp<{ result?: { value?: PanelInfo } }>('Runtime.evaluate', {
-      expression: PROBE_EXPR,
-      returnByValue: true,
-    });
-    return res?.result?.value;
-  } catch {
+    const res = await cdp<{ result?: { value?: PanelInfo }; exceptionDetails?: { exception?: { description?: string }; text?: string } }>(
+      'Runtime.evaluate',
+      { expression: PROBE_EXPR, returnByValue: true },
+    );
+    if (res?.exceptionDetails) {
+      lastProbeError = res.exceptionDetails.exception?.description || res.exceptionDetails.text || 'evaluate error';
+      return undefined;
+    }
+    const v = res?.result?.value;
+    if (v?.error) lastProbeError = v.error;
+    if (v?.strategy) lastStrategy = v.strategy;
+    return v;
+  } catch (e) {
+    lastProbeError = e instanceof Error ? e.message : String(e);
     return undefined;
   }
 }
@@ -350,6 +393,8 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   timeline = [];
   finalized = false;
   firstInteraction = true;
+  lastProbeError = '';
+  lastStrategy = '';
   wantedRequests.clear();
   responseResolvers = [];
 
@@ -402,6 +447,8 @@ async function finalize(status: ScanStatus, msg: string, reason: StopReason): Pr
   statusText = status;
   message = msg;
   stopReasonCode = reason;
+  if (lastStrategy) message += `｜面板策略:${lastStrategy}`;
+  if (lastProbeError) message += `｜探测报错:${lastProbeError}`;
   await detachDebugger();
 
   if (mode === 'diagnose') {
@@ -424,6 +471,8 @@ async function finalizeDiagnose(reason: StopReason): Promise<void> {
     stopReason: reason,
     generatedAt: new Date().toISOString(),
     timeline,
+    probeStrategy: lastStrategy || undefined,
+    probeError: lastProbeError || undefined,
   };
   diagnosis = diagnosisText(report);
   const stamp = fileStamp();
