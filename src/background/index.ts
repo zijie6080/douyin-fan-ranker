@@ -16,9 +16,10 @@ import { parseFollowerResponse } from '../lib/parser';
 import { buildOverview } from '../lib/overview';
 import { buildWorkbookBuffer, buildFileName } from '../lib/xlsx';
 import { openDb, getAllFans, putFans, setMeta } from '../lib/db';
-import { SCAN_CONFIG } from '../lib/scan-config';
+import { SCAN_CONFIG, VERIFICATION_KEYWORDS } from '../lib/scan-config';
 import { PopupToBackground, PanelInfo } from '../lib/messages';
 import { Fan, ScanState, ScanStatus } from '../lib/types';
+import { findFollowerPanelEl } from '../lib/panel';
 
 // ---------------- 全局扫描状态 ----------------
 let db: IDBDatabase | null = null;
@@ -50,14 +51,40 @@ function cdp<T = unknown>(method: string, params?: object): Promise<T> {
   });
 }
 
-function sendToTab(msg: object): Promise<PanelInfo | undefined> {
-  return new Promise((resolve) => {
-    if (tabId === null) return resolve(undefined);
-    chrome.tabs.sendMessage(tabId, msg, (resp) => {
-      if (chrome.runtime.lastError) resolve(undefined);
-      else resolve(resp as PanelInfo);
+/**
+ * 在被调试页面里就地执行“粉丝面板识别 + 验证检测 + 账号名”并取回结果。
+ * 通过 CDP Runtime.evaluate 直接在页面上下文运行，不依赖内容脚本是否已注入
+ * （避免“先开页面后装扩展、未刷新导致内容脚本缺失”这一常见失效）。
+ */
+const PROBE_EXPR = `(() => {
+  const findFollowerPanelEl = ${findFollowerPanelEl.toString()};
+  const KWS = ${JSON.stringify(VERIFICATION_KEYWORDS)};
+  const text = (document.body && document.body.innerText) || '';
+  let verification;
+  for (const k of KWS) { if (text.indexOf(k) >= 0) { verification = k; break; } }
+  let accountName;
+  try {
+    const h1 = document.querySelector('h1');
+    const t = ((h1 && h1.textContent) || '').trim();
+    if (t && t.length <= 30) accountName = t;
+    else { const ti = (document.title || '').replace(/[-|].*$/, '').trim(); accountName = ti || undefined; }
+  } catch (e) { /* ignore */ }
+  const el = findFollowerPanelEl(document, window, 250);
+  if (!el) return { found: false, verification: verification, accountName: accountName };
+  const r = el.getBoundingClientRect();
+  return { found: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, scrollTop: el.scrollTop, verification: verification, accountName: accountName };
+})()`;
+
+async function getPanel(): Promise<PanelInfo | undefined> {
+  try {
+    const res = await cdp<{ result?: { value?: PanelInfo } }>('Runtime.evaluate', {
+      expression: PROBE_EXPR,
+      returnByValue: true,
     });
-  });
+    return res?.result?.value;
+  } catch {
+    return undefined;
+  }
 }
 
 function snapshotState(): ScanState {
@@ -203,7 +230,7 @@ async function scanLoop(): Promise<void> {
       return finalize('completed', `已收集到全部 ${realFansCount} 位粉丝`);
     }
 
-    const info = await sendToTab({ type: 'GET_PANEL' });
+    const info = await getPanel();
     if (info?.accountName) accountName = info.accountName;
 
     // 安全 / 验证检测：立即停止，不绕过
@@ -238,7 +265,7 @@ async function scanLoop(): Promise<void> {
       return finalize('stopped', '扫描停止：长时间未获取到新数据');
     }
     // 检查滚动位置是否变化（诊断用途，不作为唯一依据）
-    const after = await sendToTab({ type: 'GET_PANEL' });
+    const after = await getPanel();
     const moved = after?.found && (after.scrollTop ?? -1) !== prevScrollTop;
     // 未移动也不立即失败：继续尝试（可能只是还没到触发点），仅保证最小节流
     if (!moved) await delay(SCAN_CONFIG.WHEEL_MIN_INTERVAL_MS);

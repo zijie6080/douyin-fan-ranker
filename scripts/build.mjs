@@ -16,12 +16,12 @@ const common = {
   platform: 'browser',
   target: 'chrome110',
   legalComments: 'none',
+  charset: 'utf8',
   logLevel: 'info',
 };
 
 const entries = [
   { in: 'src/background/index.ts', out: 'background.js', format: 'esm' },
-  { in: 'src/content/index.ts', out: 'content.js', format: 'iife' },
   { in: 'src/popup/popup.ts', out: 'popup.js', format: 'esm' },
 ];
 
