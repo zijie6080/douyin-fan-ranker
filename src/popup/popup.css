@@ -41,9 +41,17 @@ h1 { font-size: 16px; margin: 0 0 10px; }
 }
 .btn.primary { background: var(--primary); color: var(--primary-fg); }
 .btn.primary:disabled { background: #f6a6b5; cursor: not-allowed; }
+.btn.ghost { background: var(--track); color: var(--fg); }
+.btn.ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn.danger { background: #fff; color: var(--danger); border: 1px solid var(--danger); }
 
 .message { font-size: 12px; margin-top: 10px; padding: 8px; border-radius: 8px; background: #fff7ed; color: #9a3412; }
+
+.diag { margin-top: 12px; padding: 10px; border-radius: 8px; background: var(--track); }
+.diag-title { font-weight: 700; margin-bottom: 6px; }
+.diag-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+.diag-row span { color: var(--muted); }
+.diag-text { font-size: 12px; margin-top: 8px; white-space: pre-wrap; line-height: 1.5; }
 .foot { margin-top: 12px; text-align: center; }
 
 @media (prefers-color-scheme: dark) {

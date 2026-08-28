@@ -18,8 +18,9 @@ import { buildWorkbookBuffer, buildFileName } from '../lib/xlsx';
 import { openDb, getAllFans, putFans, setMeta } from '../lib/db';
 import { SCAN_CONFIG, VERIFICATION_KEYWORDS } from '../lib/scan-config';
 import { PopupToBackground, PanelInfo } from '../lib/messages';
-import { Fan, ScanState, ScanStatus } from '../lib/types';
+import { Fan, ScanState, ScanStatus, RunMode, StopReason, DiagnosticEntry, DiagnosticReport } from '../lib/types';
 import { findFollowerPanelEl } from '../lib/panel';
+import { diagnosisText } from '../lib/diagnostic';
 
 // ---------------- 全局扫描状态 ----------------
 let db: IDBDatabase | null = null;
@@ -33,6 +34,14 @@ let statusText: ScanStatus = 'idle';
 let message = '';
 let accountName: string | undefined;
 let finalized = false; // 保证一次扫描只结算 / 下载一次
+
+// 运行模式与诊断状态
+let mode: RunMode = 'scan';
+let lastMaxTime: number | null = null;
+let lastMinTime: number | null = null;
+let stopReasonCode: StopReason | null = null;
+let diagnosis = '';
+let timeline: DiagnosticEntry[] = [];
 
 const wantedRequests = new Set<string>(); // 命中路径、等待 body 的 requestId
 let responseResolvers: Array<() => void> = [];
@@ -100,6 +109,10 @@ function snapshotState(): ScanState {
     top: top ? { nickname: top.nickname, followerCount: top.followerCount } : null,
     message,
     accountName,
+    mode,
+    lastHasMore: hasMore,
+    stopReason: stopReasonCode,
+    diagnosis,
   };
 }
 
@@ -145,8 +158,20 @@ async function handleResponseBody(text: string): Promise<void> {
   if (result.meta.realFansCount !== undefined) realFansCount = result.meta.realFansCount;
   if (result.meta.hasMore === false) hasMore = false;
   else if (result.meta.hasMore === true) hasMore = true;
+  if (result.meta.maxTime !== undefined) lastMaxTime = result.meta.maxTime;
+  if (result.meta.minTime !== undefined) lastMinTime = result.meta.minTime;
 
   const newFans: Fan[] = store.upsertManyReturningNew(result.fans);
+
+  // 记录诊断快照（每捕获一次响应一条）
+  timeline.push({
+    uniqueFanCount: store.size,
+    hasMore,
+    realFansCount,
+    maxTime: result.meta.maxTime,
+    minTime: result.meta.minTime,
+    timestamp: Date.now(),
+  });
   if (newFans.length > 0 && db) {
     await putFans(db, newFans).catch(() => undefined);
     await setMeta(db, 'progress', {
@@ -225,9 +250,11 @@ async function scanLoop(): Promise<void> {
 
   for (let round = 0; scanning && round < SCAN_CONFIG.MAX_WHEEL_ROUNDS; round += 1) {
     // 正常完成条件
-    if (hasMore === false) return finalize('completed', '抖音返回 has_more=false，粉丝列表已全部加载');
+    if (hasMore === false) {
+      return finalize('completed', '抖音返回 has_more=false，粉丝列表已全部加载', 'has_more_false');
+    }
     if (realFansCount !== null && store.size >= realFansCount) {
-      return finalize('completed', `已收集到全部 ${realFansCount} 位粉丝`);
+      return finalize('completed', `已收集到全部 ${realFansCount} 位粉丝`, 'reached_real_fans_count');
     }
 
     const info = await getPanel();
@@ -235,13 +262,13 @@ async function scanLoop(): Promise<void> {
 
     // 安全 / 验证检测：立即停止，不绕过
     if (info?.verification) {
-      return finalize('error', `检测到疑似安全验证（${info.verification}），已停止，不做任何绕过`);
+      return finalize('error', `检测到疑似安全验证（${info.verification}），已停止，不做任何绕过`, 'verification');
     }
 
     if (!info || !info.found || !info.rect) {
       // 面板暂时找不到：进入恢复
       stall += 1;
-      if (stall >= giveUpAt) return finalize('stopped', '扫描停止：长时间未找到粉丝列表区域');
+      if (stall >= giveUpAt) return finalize('stopped', '扫描停止：长时间未找到粉丝列表区域', 'panel_not_found');
       await delay(SCAN_CONFIG.RECOVERY_WAIT_MS);
       continue;
     }
@@ -262,7 +289,7 @@ async function scanLoop(): Promise<void> {
     // 本轮没等到新响应
     stall += 1;
     if (stall >= giveUpAt) {
-      return finalize('stopped', '扫描停止：长时间未获取到新数据');
+      return finalize('stopped', '扫描停止：长时间未获取到新数据', 'no_new_data_after_retries');
     }
     // 检查滚动位置是否变化（诊断用途，不作为唯一依据）
     const after = await getPanel();
@@ -271,18 +298,24 @@ async function scanLoop(): Promise<void> {
     if (!moved) await delay(SCAN_CONFIG.WHEEL_MIN_INTERVAL_MS);
   }
 
-  if (scanning) return finalize('stopped', '达到最大滚动保护上限，已停止');
+  if (scanning) return finalize('stopped', '达到最大滚动保护上限，已停止', 'max_rounds');
 }
 
 // ---------------- 生命周期 ----------------
-async function beginScan(id: number): Promise<void> {
+async function beginScan(id: number, runMode: RunMode): Promise<void> {
   if (scanning) return;
   tabId = id;
+  mode = runMode;
   statusText = 'scanning';
   message = '';
+  diagnosis = '';
   captured = 0;
   hasMore = null;
   realFansCount = null;
+  lastMaxTime = null;
+  lastMinTime = null;
+  stopReasonCode = null;
+  timeline = [];
   finalized = false;
   wantedRequests.clear();
   responseResolvers = [];
@@ -329,15 +362,51 @@ async function detachDebugger(): Promise<void> {
   }).catch(() => undefined);
 }
 
-async function finalize(status: ScanStatus, msg: string): Promise<void> {
+async function finalize(status: ScanStatus, msg: string, reason: StopReason): Promise<void> {
   if (finalized) return; // 避免 STOP 与循环完成竞争导致重复结算 / 重复下载
   finalized = true;
   scanning = false;
   statusText = status;
   message = msg;
+  stopReasonCode = reason;
   await detachDebugger();
 
-  // 生成并下载 Excel（+ JSON 备份）
+  if (mode === 'diagnose') {
+    await finalizeDiagnose(reason);
+  } else {
+    await finalizeScan();
+  }
+  broadcast();
+}
+
+/** 诊断模式：只生成并下载 diagnostic.json，并给出人类可读结论 */
+async function finalizeDiagnose(reason: StopReason): Promise<void> {
+  const report: DiagnosticReport = {
+    realFansCount,
+    uniqueFansCollected: store.size,
+    capturedResponses: captured,
+    lastHasMore: hasMore,
+    lastMaxTime,
+    lastMinTime,
+    stopReason: reason,
+    generatedAt: new Date().toISOString(),
+    timeline,
+  };
+  diagnosis = diagnosisText(report);
+  const stamp = fileStamp();
+  try {
+    await triggerDownload(
+      `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(report, null, 2))}`,
+      `抖音粉丝诊断_${stamp}.json`,
+    );
+    message += `｜诊断报告已下载 diagnostic.json`;
+  } catch (e) {
+    message += `｜下载诊断报告失败：${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** 正常扫描：生成并下载 Excel（+ JSON 备份） */
+async function finalizeScan(): Promise<void> {
   try {
     const sorted = store.sorted();
     const overview = buildOverview(sorted, realFansCount);
@@ -364,7 +433,12 @@ async function finalize(status: ScanStatus, msg: string): Promise<void> {
   } catch (e) {
     message += `｜导出 Excel 失败：${e instanceof Error ? e.message : String(e)}`;
   }
-  broadcast();
+}
+
+/** YYYY-MM-DD_HH-mm */
+function fileStamp(now = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}_${p(now.getHours())}-${p(now.getMinutes())}`;
 }
 
 function triggerDownload(url: string, filename: string): Promise<void> {
@@ -379,7 +453,7 @@ function triggerDownload(url: string, filename: string): Promise<void> {
 // 用户在 DevTools 提示条点“取消”会触发 detach：视为停止并保存
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === tabId && scanning) {
-    void finalize('stopped', '调试会话已断开（可能点了停止调试提示），已保存当前数据');
+    void finalize('stopped', '调试会话已断开（可能点了停止调试提示），已保存当前数据', 'debugger_detached');
   }
 });
 
@@ -387,10 +461,10 @@ chrome.debugger.onEvent.addListener(onDebuggerEvent);
 
 chrome.runtime.onMessage.addListener((msg: PopupToBackground, _sender, sendResponse) => {
   if (msg?.type === 'START_SCAN') {
-    void beginScan(msg.tabId);
+    void beginScan(msg.tabId, msg.mode ?? 'scan');
     sendResponse(snapshotState());
   } else if (msg?.type === 'STOP_SCAN') {
-    if (scanning) void finalize('stopped', '已停止并保存');
+    if (scanning) void finalize('stopped', '已停止并保存', 'user_stopped');
     sendResponse(snapshotState());
   } else if (msg?.type === 'GET_STATE') {
     sendResponse(snapshotState());

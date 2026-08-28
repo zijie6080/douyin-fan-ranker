@@ -2,8 +2,9 @@
  * Popup 逻辑：读取/展示扫描状态，开始 / 停止扫描。保持极简。
  */
 import { BackgroundToPopup, PopupToBackground } from '../lib/messages';
-import { ScanState } from '../lib/types';
+import { RunMode, ScanState } from '../lib/types';
 import { formatNumber, formatWan } from '../lib/utils';
+import { stopReasonLabel } from '../lib/diagnostic';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -18,8 +19,15 @@ const el = {
   topCount: $('top-count'),
   hint: $('hint'),
   start: $<HTMLButtonElement>('start'),
+  diagnose: $<HTMLButtonElement>('diagnose'),
   stop: $<HTMLButtonElement>('stop'),
   message: $('message'),
+  diag: $('diag'),
+  dTotal: $('d-total'),
+  dCollected: $('d-collected'),
+  dHasMore: $('d-hasmore'),
+  dReason: $('d-reason'),
+  dText: $('d-text'),
 };
 
 let currentTabId: number | null = null;
@@ -53,14 +61,18 @@ function render(state: ScanState): void {
 
   const scanning = state.status === 'scanning';
   el.start.classList.toggle('hidden', scanning);
+  el.diagnose.classList.toggle('hidden', scanning);
   el.stop.classList.toggle('hidden', !scanning);
 
+  const diagnoseMode = state.mode === 'diagnose';
   if (scanning) {
-    el.hint.textContent = '扫描中……请保持该抖音标签页在前台、粉丝列表可见。';
+    el.hint.textContent = diagnoseMode
+      ? '诊断中……自动滚动到底，无需你碰鼠标。'
+      : '扫描中……请保持该抖音标签页在前台、粉丝列表可见。';
   } else if (state.status === 'completed') {
-    el.hint.textContent = '✅ 扫描完成，Excel 已开始下载。';
+    el.hint.textContent = diagnoseMode ? '✅ 诊断完成。' : '✅ 扫描完成，Excel 已开始下载。';
   } else if (state.status === 'stopped') {
-    el.hint.textContent = '已停止并保存，Excel 已开始下载。';
+    el.hint.textContent = diagnoseMode ? '诊断已结束。' : '已停止并保存，Excel 已开始下载。';
   } else if (state.status === 'error') {
     el.hint.textContent = '已停止。';
   } else {
@@ -74,7 +86,20 @@ function render(state: ScanState): void {
     el.message.classList.add('hidden');
   }
 
+  // 诊断结果面板：仅在诊断模式且已结束时显示
+  const showDiag = diagnoseMode && !scanning && state.status !== 'idle';
+  el.diag.classList.toggle('hidden', !showDiag);
+  if (showDiag) {
+    el.dTotal.textContent = state.realFansCount !== null ? formatNumber(state.realFansCount) : '未知';
+    el.dCollected.textContent = formatNumber(state.collected);
+    el.dHasMore.textContent =
+      state.lastHasMore === true ? 'true' : state.lastHasMore === false ? 'false' : '未知';
+    el.dReason.textContent = state.stopReason ? stopReasonLabel(state.stopReason) : '—';
+    el.dText.textContent = state.diagnosis || '';
+  }
+
   el.start.disabled = !tabIsDouyin;
+  el.diagnose.disabled = !tabIsDouyin;
 }
 
 async function init(): Promise<void> {
@@ -88,12 +113,17 @@ async function init(): Promise<void> {
   if (state) render(state);
 }
 
-el.start.addEventListener('click', async () => {
+async function startWithMode(mode: RunMode): Promise<void> {
   if (currentTabId === null) return;
   el.start.disabled = true;
-  const state = await send({ type: 'START_SCAN', tabId: currentTabId });
+  el.diagnose.disabled = true;
+  el.diag.classList.add('hidden');
+  const state = await send({ type: 'START_SCAN', tabId: currentTabId, mode });
   if (state) render(state);
-});
+}
+
+el.start.addEventListener('click', () => startWithMode('scan'));
+el.diagnose.addEventListener('click', () => startWithMode('diagnose'));
 
 el.stop.addEventListener('click', async () => {
   const state = await send({ type: 'STOP_SCAN' });

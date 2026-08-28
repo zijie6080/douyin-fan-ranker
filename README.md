@@ -53,6 +53,24 @@
 
 > 扫描时请让该抖音标签页**保持在前台**、粉丝弹窗可见，效果最好。
 
+### 全自动分页诊断（想知道"到底能抓多少"时用）
+
+如果你怀疑"网页只能加载一部分粉丝"，用这个模式**一键自动诊断**，全程不用碰鼠标：
+
+1. 打开抖音 → 打开自己的「粉丝」列表 → 点扩展 →「**开始诊断（自动滚到底）**」。
+2. 程序自动持续滚动、监听 `follower/list`，**一直滚到网页再也拿不到新粉丝为止**。
+3. 结束后弹窗直接给出结论，并自动下载 `diagnostic.json`（技术备份）。
+
+诊断会显示：**总粉丝 / 实际可读取 / 最后 has_more / 停止原因**，并给出结论，例如：
+
+- 停在 2037、`has_more=true` →「网页 UI 已停止加载，但服务器最后仍表示 has_more=true。
+  说明可能存在前端显示/滚动限制，后端仍可能有更多数据。」
+- 停在 2037、`has_more=false` →「当前 Web follower/list 数据源在约 2037 人处结束，继续滚动无法获得剩余粉丝。」
+
+你**不需要**打开 DevTools、查 Response、看 max_time、手动滚到底或复制任何 URL——全部由程序自动完成。
+`diagnostic.json` 里包含 `realFansCount / uniqueFansCollected / capturedResponses / lastHasMore /
+lastMaxTime / lastMinTime / stopReason` 以及每次响应的时间线，方便你把结果发我进一步分析（请勿包含 Cookie/Token）。
+
 ---
 
 ## 三、输出：Excel 长什么样

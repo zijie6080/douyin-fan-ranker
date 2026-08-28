@@ -1,11 +1,11 @@
 /**
  * popup ⇄ background ⇄ content 之间的消息契约。
  */
-import { ScanState } from './types';
+import { RunMode, ScanState } from './types';
 
 /** popup → background */
 export type PopupToBackground =
-  | { type: 'START_SCAN'; tabId: number }
+  | { type: 'START_SCAN'; tabId: number; mode?: RunMode }
   | { type: 'STOP_SCAN' }
   | { type: 'GET_STATE' };
 

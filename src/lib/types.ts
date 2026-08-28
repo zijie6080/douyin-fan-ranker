@@ -42,8 +42,46 @@ export interface FansSnapshot {
   fans: Fan[];
 }
 
+/** 运行模式：正常扫描导出 Excel / 全自动分页诊断 */
+export type RunMode = 'scan' | 'diagnose';
+
 /** 扫描状态机 */
 export type ScanStatus = 'idle' | 'scanning' | 'completed' | 'stopped' | 'error';
+
+/** 每捕获一次 follower/list 响应记录的诊断快照 */
+export interface DiagnosticEntry {
+  uniqueFanCount: number;
+  hasMore: boolean | null;
+  realFansCount: number | null;
+  maxTime?: number;
+  minTime?: number;
+  timestamp: number;
+}
+
+/** 停止原因机器码 */
+export type StopReason =
+  | 'has_more_false'
+  | 'reached_real_fans_count'
+  | 'no_new_data_after_retries'
+  | 'panel_not_found'
+  | 'verification'
+  | 'user_stopped'
+  | 'debugger_detached'
+  | 'max_rounds'
+  | 'error';
+
+/** 诊断报告（写入 diagnostic.json） */
+export interface DiagnosticReport {
+  realFansCount: number | null;
+  uniqueFansCollected: number;
+  capturedResponses: number;
+  lastHasMore: boolean | null;
+  lastMaxTime: number | null;
+  lastMinTime: number | null;
+  stopReason: StopReason;
+  generatedAt: string;
+  timeline: DiagnosticEntry[];
+}
 
 /** 广播给 popup 的实时扫描状态 */
 export interface ScanState {
@@ -62,6 +100,14 @@ export interface ScanState {
   message: string;
   /** 账号昵称（若能读取） */
   accountName?: string;
+  /** 当前运行模式 */
+  mode: RunMode;
+  /** 最后一次响应的 has_more（诊断展示用） */
+  lastHasMore: boolean | null;
+  /** 停止原因机器码 */
+  stopReason: StopReason | null;
+  /** 诊断模式结束后的人类可读结论（两段合一） */
+  diagnosis: string;
 }
 
 /** 数据概览（Excel 第二个 sheet 用） */
