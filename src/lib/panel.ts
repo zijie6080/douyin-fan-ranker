@@ -5,9 +5,10 @@
  * 可滚动 + 可见 + 在视口内 + 高度达标 + 头像/用户行数量 + 「回关/移除/已关注」文案
  * + 处于 dialog/overlay 浮层内。
  */
-const HINTS = ['回关', '移除', '已关注', '相互关注'];
-
 export function findFollowerPanelEl(doc: Document, win: Window, minHeight = 250): HTMLElement | null {
+  // 注意：所有依赖都必须在函数内部（本函数会被 .toString() 注入页面执行，
+  // 不能引用任何模块级变量，否则压缩改名后会在页面里报 "xx is not defined"）。
+  const HINTS = ['回关', '移除', '已关注', '相互关注'];
   const isScrollable = (el: Element): boolean => {
     const style = win.getComputedStyle(el);
     const oy = style.overflowY;
