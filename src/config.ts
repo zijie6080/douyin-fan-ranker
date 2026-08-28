@@ -12,8 +12,15 @@ export const CONFIG = {
   /** 只处理 URL 中包含该子串的 Response（不硬编码完整 URL） */
   FOLLOWER_LIST_PATH: '/aweme/v1/web/user/follower/list/',
 
-  /** 浏览器 profile 目录（保存登录态，绝不提交到仓库） */
+  /** 浏览器 profile 目录（真实 Chrome 用，保存登录态，绝不提交到仓库） */
   PROFILE_DIR: '.browser-profile',
+
+  /**
+   * 回退到 Playwright 内置 Chromium 时使用的独立 profile 目录。
+   * 必须与 Chrome 的 profile 分开：两种引擎的 Cookie 加密方式 / profile 结构不兼容，
+   * 共用同一目录会导致其中一方读取时表现为“未登录”。
+   */
+  PROFILE_DIR_CHROMIUM: '.browser-profile-chromium',
 
   /** 输出目录 */
   OUTPUT_DIR: 'output',

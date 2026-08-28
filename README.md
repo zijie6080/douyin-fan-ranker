@@ -52,9 +52,31 @@
 
 1. 双击 `start.bat` 后，程序会**自动弹出一个 Chrome 浏览器**，并打开抖音首页。
 2. 在这个浏览器里，**像平常一样登录你自己的抖音账号**（扫码或短信都行）。
-3. 登录信息会保存在项目里的 `.browser-profile/` 文件夹，**下次一般不用重新登录**。
+3. 登录信息会保存在项目里的 `.browser-profile/` 文件夹，**以后再运行会自动复用，正常情况下不用再登录**。
 
 > 这个浏览器是程序专用的，和你平时用的 Chrome 是分开的，不会读取你原来的浏览器数据。
+
+### 关于“保持登录”（重要）
+
+- **只需第一次登录一次。** 登录状态保存在项目目录下的 `.browser-profile/` 文件夹里，
+  之后每次运行都会**复用同一个文件夹**，所以正常情况下**不会**每次都要重新登录。
+- 程序启动时终端会打印它正在使用的 profile 目录，例如：
+  `登录 profile 目录：C:\...\douyin-fan-ranker\.browser-profile`，
+  并提示“检测到已保存的登录 profile”。**每次看到的目录应该是同一个。**
+- 想真正保持登录，请注意：
+  - **保留 `.browser-profile/` 文件夹**，不要删除它，也不要把新下载的项目覆盖到它上面。
+  - 建议用完通过程序正常结束（扫描完成会自动退出）或按一次 `Ctrl+C`，让登录状态写入磁盘。
+  - **强烈建议安装 Google Chrome**：程序优先用系统 Chrome。若没装 Chrome 会回退到内置
+    Chromium（用另一个独立目录 `.browser-profile-chromium/`），装上 Chrome 后登录会最稳定。
+- 如果确实需要**切换账号 / 清除登录**：双击 **`reset-login.bat`**（或命令行 `npm run reset-login`），
+  它会删除已保存的登录 profile，下次运行重新登录即可。**这是唯一会删除登录的操作**，程序平时不会删。
+
+如果你发现每次都要重新登录，请对照排查：
+
+1. 你是不是每次都**重新解压了一份新的项目**到新文件夹？换新文件夹 = 没有旧的 `.browser-profile/`。
+   请固定用同一个项目文件夹。
+2. 启动日志里的“登录 profile 目录”每次是否**一致**？不一致说明启动目录变了。
+3. 有没有装 Google Chrome？装了会走 Chrome 稳定复用；没装会走 Chromium（另一个目录）。
 
 ---
 
@@ -153,8 +175,10 @@ douyin-fan-ranker/
 ├─ fixtures/
 │  └─ follower-response.example.json   # 纯虚构的示例响应（无任何真实账号/Token）
 ├─ output/            # 输出目录（结果默认不提交到仓库）
-├─ .browser-profile/  # 浏览器 profile（含登录态，已被 .gitignore 忽略）
+├─ .browser-profile/  # 真实 Chrome 的登录 profile（含登录态，已被 .gitignore 忽略）
+├─ .browser-profile-chromium/  # 内置 Chromium 回退时的独立 profile（同样被忽略）
 ├─ start.bat / start.ps1   # Windows 一键启动
+├─ reset-login.bat    # 清除已保存登录（切换账号时用；唯一会删除 profile 的入口）
 ├─ package.json / tsconfig.json / .eslintrc.json / vitest.config.ts
 ```
 
@@ -166,6 +190,7 @@ npm run build     # TypeScript 编译检查
 npm test          # 运行全部单元测试
 npm run lint      # 代码风格检查
 npm start         # 运行程序（等同于 start.bat 的核心步骤）
+npm run reset-login   # 清除已保存的抖音登录（切换账号时用）
 ```
 
 ### 可调参数（`src/config.ts`）

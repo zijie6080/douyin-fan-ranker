@@ -10,10 +10,11 @@
  *
  * 严格边界：不构造抖音接口请求，不打印敏感数据，不绕过验证。
  */
+import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { CONFIG } from './config';
-import { launchBrowser } from './browser';
+import { launchBrowser, chromeProfilePath, chromiumProfilePath } from './browser';
 import { attachFollowerListener } from './listener';
 import {
   FanStore,
@@ -43,7 +44,30 @@ function waitForEnter(prompt: string): Promise<void> {
   });
 }
 
+/** 显式重置登录：删除持久化 profile 目录（仅在用户主动要求时执行） */
+function resetLogin(): void {
+  const dirs = [chromeProfilePath(), chromiumProfilePath()];
+  let removed = 0;
+  for (const dir of dirs) {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed += 1;
+      console.log(`🧹 已删除登录 profile：${dir}`);
+    }
+  }
+  if (removed === 0) {
+    console.log('（没有找到已保存的登录 profile，无需重置。）');
+  }
+  console.log('✅ 重置完成。下次运行需要重新登录抖音。');
+}
+
 async function main(): Promise<void> {
+  // 显式重置登录（唯一会删除 profile 的入口）
+  if (process.argv.slice(2).includes('--reset-login')) {
+    resetLogin();
+    return;
+  }
+
   const outputDir = path.resolve(process.cwd(), CONFIG.OUTPUT_DIR);
 
   console.log('================ 抖音粉丝分析原型 (v0.1) ================');
@@ -60,8 +84,18 @@ async function main(): Promise<void> {
     console.log(`📁 已从 output/fans.json 载入 ${added} 位已有粉丝作为缓存（将自动去重）。\n`);
   }
 
-  console.log('🚀 正在启动 Chrome 浏览器...');
-  const { context, page } = await launchBrowser();
+  // 启动前判断是否已有登录 profile（用于提示“复用登录”还是“首次登录”）
+  const hadProfile = fs.existsSync(chromeProfilePath()) || fs.existsSync(chromiumProfilePath());
+
+  console.log('🚀 正在启动浏览器...');
+  const { context, page, engine, profilePath } = await launchBrowser();
+  console.log(`   浏览器引擎：${engine === 'chrome' ? '系统 Google Chrome' : '内置 Chromium（未检测到系统 Chrome）'}`);
+  console.log(`   登录 profile 目录：${profilePath}`);
+  if (hadProfile) {
+    console.log('   ✅ 检测到已保存的登录 profile —— 正常情况下应已保持登录，无需重新登录。');
+  } else {
+    console.log('   ℹ️  首次运行：请在浏览器里登录一次，登录状态会保存到上面的目录，以后自动复用。');
+  }
 
   let realFansCount: number | null = null;
   let lastNewFanAt = Date.now();
@@ -88,12 +122,18 @@ async function main(): Promise<void> {
   });
 
   let stopRequested = false;
+  let scanStarted = false;
 
-  // Ctrl+C：保存后优雅退出
+  // Ctrl+C：保存并优雅退出（关闭 context 会把登录态写盘，避免登录丢失）
   const onSigint = (): void => {
     if (stopRequested) return;
     stopRequested = true;
-    console.log('\n⏹️  收到停止指令 (Ctrl+C)，正在保存已收集数据...');
+    console.log('\n⏹️  收到停止指令 (Ctrl+C)，正在保存并安全退出...');
+    if (!scanStarted) {
+      // 还没开始扫描（可能正在登录）：直接优雅关闭，确保 profile 落盘
+      void finish().finally(() => process.exit(0));
+    }
+    // 扫描中：交给主循环检测 stopRequested 后走正常 finish 流程
   };
   process.on('SIGINT', onSigint);
 
@@ -125,6 +165,7 @@ async function main(): Promise<void> {
   let noProgressRounds = 0;
   let firstInteraction = true;
   let stopReason = '';
+  scanStarted = true;
 
   for (let round = 0; round < CONFIG.MAX_SCROLL_ROUNDS; round += 1) {
     if (stopRequested) {

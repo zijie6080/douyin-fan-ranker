@@ -6,6 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "ts-node src/index.ts",
+    "reset-login": "ts-node src/index.ts --reset-login",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
