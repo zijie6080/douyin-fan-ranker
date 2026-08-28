@@ -3,7 +3,6 @@
   "name": "抖音高价值粉丝 (Douyin Fan Ranker)",
   "version": "0.2.0",
   "description": "在你日常使用、已登录抖音的 Chrome 里，扫描自己的全部粉丝并按其粉丝数从高到低导出 Excel。数据仅存本地。",
-  "default_locale": "zh_CN",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
