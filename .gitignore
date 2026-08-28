@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# 浏览器 profile（包含登录会话，绝不提交）
+.browser-profile/
+
+# 抓取结果（可能含个人数据，默认不提交）
+output/*.json
+output/*.csv
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db

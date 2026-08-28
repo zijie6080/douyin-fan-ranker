@@ -1,0 +1,79 @@
+{
+  "status_code": 0,
+  "has_more": true,
+  "max_time": 1699999999,
+  "min_time": 1699990000,
+  "offset": 20,
+  "mix_count": 0,
+  "real_fans_count": 14570,
+  "total": 14570,
+  "followers": [
+    {
+      "sec_uid": "MS4wLjABAAAA_fake_seller_aaa",
+      "uid": "1000000000000000001",
+      "unique_id": "fake_seller",
+      "nickname": "虚构商家小铺",
+      "follower_count": 382000,
+      "following_count": 120,
+      "aweme_count": 640,
+      "signature": "这是一条虚构签名，仅供测试。",
+      "avatar_thumb": {
+        "uri": "fake/uri/aaa",
+        "url_list": [
+          "https://example.com/avatar/aaa.jpg",
+          "https://example.com/avatar/aaa2.jpg"
+        ]
+      }
+    },
+    {
+      "sec_uid": "MS4wLjABAAAA_fake_traveler_bbb",
+      "uid": "1000000000000000002",
+      "unique_id": "fake_traveler",
+      "nickname": "虚构旅行日记",
+      "follower_count": 15230,
+      "following_count": 88,
+      "aweme_count": 210,
+      "signature": "记录虚构的旅行，测试数据。",
+      "avatar_thumb": {
+        "url_list": ["https://example.com/avatar/bbb.jpg"]
+      }
+    },
+    {
+      "sec_uid": "MS4wLjABAAAA_fake_student_ccc",
+      "uid": "1000000000000000003",
+      "nickname": "虚构学习笔记",
+      "follower_count": 542,
+      "following_count": 300,
+      "aweme_count": 12,
+      "avatar_thumb": {
+        "url_list": ["https://example.com/avatar/ccc.jpg"]
+      }
+    },
+    {
+      "user": {
+        "sec_uid": "MS4wLjABAAAA_fake_nested_ddd",
+        "uid": "1000000000000000004",
+        "unique_id": "fake_nested",
+        "nickname": "虚构嵌套用户",
+        "follower_count": 8800,
+        "following_count": 42,
+        "aweme_count": 55,
+        "avatar_thumb": {
+          "url_list": ["https://example.com/avatar/ddd.jpg"]
+        }
+      }
+    },
+    {
+      "sec_uid": "MS4wLjABAAAA_fake_seller_aaa",
+      "uid": "1000000000000000001",
+      "unique_id": "fake_seller",
+      "nickname": "虚构商家小铺（改名后）",
+      "follower_count": 383500,
+      "following_count": 121,
+      "aweme_count": 641,
+      "avatar_thumb": {
+        "url_list": ["https://example.com/avatar/aaa_new.jpg"]
+      }
+    }
+  ]
+}
