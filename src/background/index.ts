@@ -231,9 +231,20 @@ function waitForResponse(ms: number): Promise<boolean> {
   });
 }
 
+let firstInteraction = true;
+
 async function dispatchWheel(rect: { x: number; y: number; width: number; height: number }): Promise<void> {
   const x = rect.x + rect.width * SCAN_CONFIG.WHEEL_POINT_X_RATIO;
   const y = rect.y + rect.height * SCAN_CONFIG.WHEEL_POINT_Y_RATIO;
+
+  // 关键：先把指针移动到粉丝列表上（很多虚拟列表只响应“指针悬停处”的滚轮）；
+  // 首次再点击一下，让 React 滚动组件进入交互 / 焦点状态。
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }).catch(() => undefined);
+  if (firstInteraction) {
+    firstInteraction = false;
+    await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }).catch(() => undefined);
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }).catch(() => undefined);
+  }
   await cdp('Input.dispatchMouseEvent', {
     type: 'mouseWheel',
     x,
@@ -241,6 +252,18 @@ async function dispatchWheel(rect: { x: number; y: number; width: number; height
     deltaX: 0,
     deltaY: SCAN_CONFIG.WHEEL_DELTA,
   }).catch(() => undefined);
+}
+
+/** 兜底：直接在页面里滚动识别到的面板（真实滚轮无效时的补充手段） */
+async function jsScrollPanel(): Promise<void> {
+  const expr = `(() => {
+    const findFollowerPanelEl = ${findFollowerPanelEl.toString()};
+    const el = findFollowerPanelEl(document, window, 250);
+    if (!el) return -1;
+    el.scrollTop = el.scrollTop + Math.max(200, Math.floor(el.clientHeight * 0.9));
+    return el.scrollTop;
+  })()`;
+  await cdp('Runtime.evaluate', { expression: expr, returnByValue: true }).catch(() => undefined);
 }
 
 // ---------------- 扫描主循环（事件驱动）----------------
@@ -291,6 +314,15 @@ async function scanLoop(): Promise<void> {
     if (stall >= giveUpAt) {
       return finalize('stopped', '扫描停止：长时间未获取到新数据', 'no_new_data_after_retries');
     }
+    // 本轮无新响应：兜底再用 JS 直接滚动面板一次（应对真实滚轮未生效的列表变体）
+    await jsScrollPanel();
+    const gotAfterJs = await waitForResponse(SCAN_CONFIG.RESPONSE_WAIT_MS);
+    if (gotAfterJs) {
+      stall = 0;
+      await delay(SCAN_CONFIG.POST_RESPONSE_DELAY_MS);
+      continue;
+    }
+
     // 检查滚动位置是否变化（诊断用途，不作为唯一依据）
     const after = await getPanel();
     const moved = after?.found && (after.scrollTop ?? -1) !== prevScrollTop;
@@ -317,6 +349,7 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   stopReasonCode = null;
   timeline = [];
   finalized = false;
+  firstInteraction = true;
   wantedRequests.clear();
   responseResolvers = [];
 

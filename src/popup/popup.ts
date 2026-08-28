@@ -66,9 +66,10 @@ function render(state: ScanState): void {
 
   const diagnoseMode = state.mode === 'diagnose';
   if (scanning) {
+    const cap = `已捕获接口 ${state.capturedResponses} 次`;
     el.hint.textContent = diagnoseMode
-      ? '诊断中……自动滚动到底，无需你碰鼠标。'
-      : '扫描中……请保持该抖音标签页在前台、粉丝列表可见。';
+      ? `诊断中……自动滚动，无需碰鼠标（${cap}）。`
+      : `扫描中……请保持该抖音标签页在前台、粉丝列表可见（${cap}）。`;
   } else if (state.status === 'completed') {
     el.hint.textContent = diagnoseMode ? '✅ 诊断完成。' : '✅ 扫描完成，Excel 已开始下载。';
   } else if (state.status === 'stopped') {
