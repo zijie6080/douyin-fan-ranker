@@ -15,6 +15,10 @@ export type FollowerBatchHandler = (result: ParseResult) => void;
 export interface ListenerHandle {
   /** 已捕获（命中路径且成功解析）的 Response 次数 */
   readonly capturedCount: number;
+  /** 命中路径但失败（非 2xx / JSON 解析失败 / 解析出错）的【连续】次数，成功一次即清零 */
+  readonly consecutiveFailures: number;
+  /** 命中路径但失败的累计次数 */
+  readonly failureCount: number;
   /** 停止监听 */
   stop(): void;
 }
@@ -25,7 +29,15 @@ export interface ListenerHandle {
  */
 export function attachFollowerListener(page: Page, onBatch: FollowerBatchHandler): ListenerHandle {
   let captured = 0;
+  let consecutiveFailures = 0;
+  let failureTotal = 0;
   let stopped = false;
+
+  const markFailure = (msg: string): void => {
+    consecutiveFailures += 1;
+    failureTotal += 1;
+    console.warn(msg);
+  };
 
   const handler = async (response: Response): Promise<void> => {
     if (stopped) return;
@@ -37,7 +49,7 @@ export function attachFollowerListener(page: Page, onBatch: FollowerBatchHandler
     const status = response.status();
     if (status < 200 || status >= 300) {
       // 记录状态并跳过，绝不打印 URL / query
-      console.warn(`⚠️  粉丝列表接口返回非成功状态 ${status}，已跳过该响应。`);
+      markFailure(`⚠️  粉丝列表接口返回非成功状态 ${status}，已跳过该响应。`);
       return;
     }
 
@@ -46,7 +58,7 @@ export function attachFollowerListener(page: Page, onBatch: FollowerBatchHandler
       json = await response.json();
     } catch {
       // JSON 解析失败不崩溃
-      console.warn('⚠️  一条粉丝列表响应无法解析为 JSON，已跳过。');
+      markFailure('⚠️  一条粉丝列表响应无法解析为 JSON，已跳过。');
       return;
     }
 
@@ -54,11 +66,12 @@ export function attachFollowerListener(page: Page, onBatch: FollowerBatchHandler
     try {
       result = parseFollowerResponse(json);
     } catch {
-      console.warn('⚠️  解析粉丝数据时出错，已跳过该响应。');
+      markFailure('⚠️  解析粉丝数据时出错，已跳过该响应。');
       return;
     }
 
     captured += 1;
+    consecutiveFailures = 0; // 成功一次即清零连续失败计数
     onBatch(result);
   };
 
@@ -67,6 +80,12 @@ export function attachFollowerListener(page: Page, onBatch: FollowerBatchHandler
   return {
     get capturedCount() {
       return captured;
+    },
+    get consecutiveFailures() {
+      return consecutiveFailures;
+    },
+    get failureCount() {
+      return failureTotal;
     },
     stop() {
       stopped = true;

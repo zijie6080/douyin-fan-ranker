@@ -98,11 +98,15 @@ async function main(): Promise<void> {
   }
 
   let realFansCount: number | null = null;
-  let lastNewFanAt = Date.now();
+  let lastResponseAt = Date.now();
   let noMoreFlag = false;
 
   // 注册被动监听
   const listener = attachFollowerListener(page, (result) => {
+    // 每收到一条有效的 follower/list 响应就刷新时间戳（无论是否新增）。
+    // 断点续扫时列表顶部大量是已保存用户（added=0），但只要还在持续返回响应，
+    // 就说明加载正常、不该判为停滞——因此用“最近一次响应时间”而非“最近一次新增”。
+    lastResponseAt = Date.now();
     if (result.meta.realFansCount !== undefined) {
       realFansCount = result.meta.realFansCount;
     }
@@ -110,7 +114,6 @@ async function main(): Promise<void> {
     store.upsertMany(result.fans);
     const added = store.size - before;
     if (added > 0) {
-      lastNewFanAt = Date.now();
       // 每批新增后增量安全保存
       saveOutputs(outputDir, store, realFansCount, listener.capturedCount);
       printProgress(store, realFansCount, listener.capturedCount);
@@ -123,19 +126,50 @@ async function main(): Promise<void> {
 
   let stopRequested = false;
   let scanStarted = false;
+  let userStopped = false;
+  let completed = false;
+  let keypressCleanup: () => void = () => undefined;
 
-  // Ctrl+C：保存并优雅退出（关闭 context 会把登录态写盘，避免登录丢失）
-  const onSigint = (): void => {
+  // 统一的“先保存再优雅退出”入口：Ctrl+C 与 Q 都走这里（关闭 context 也会把登录态写盘）
+  const requestStop = (label: string): void => {
     if (stopRequested) return;
     stopRequested = true;
-    console.log('\n⏹️  收到停止指令 (Ctrl+C)，正在保存并安全退出...');
+    userStopped = true;
+    console.log(`\n⏹️  ${label}，正在保存并安全退出...`);
     if (!scanStarted) {
-      // 还没开始扫描（可能正在登录）：直接优雅关闭，确保 profile 落盘
+      // 还没开始扫描（可能正在登录）：直接优雅关闭，确保数据与 profile 落盘
       void finish().finally(() => process.exit(0));
     }
     // 扫描中：交给主循环检测 stopRequested 后走正常 finish 流程
   };
+  const onSigint = (): void => requestStop('收到停止指令 (Ctrl+C)');
   process.on('SIGINT', onSigint);
+
+  // 扫描期间支持按 Q 主动停止（终端为 TTY 时启用原始键盘输入）
+  const enableQuitKey = (): void => {
+    if (!process.stdin.isTTY) return;
+    readline.emitKeypressEvents(process.stdin);
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      return;
+    }
+    const onKey = (_str: string, key: readline.Key): void => {
+      if (!key) return;
+      if (key.name === 'q') requestStop('收到停止指令 (Q)');
+      else if (key.ctrl && key.name === 'c') requestStop('收到停止指令 (Ctrl+C)');
+    };
+    process.stdin.on('keypress', onKey);
+    keypressCleanup = (): void => {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        /* 忽略 */
+      }
+      process.stdin.off('keypress', onKey);
+      process.stdin.pause();
+    };
+  };
 
   console.log('\n👉 请在打开的浏览器里：');
   console.log('   1) 登录你自己的抖音账号');
@@ -143,8 +177,10 @@ async function main(): Promise<void> {
   console.log('   3) 点击「粉丝」，确认粉丝列表已经显示出来');
   await waitForEnter('\n完成后回到终端按 Enter 开始扫描... ');
 
-  console.log('\n🔎 开始扫描（最多收集 ' + CONFIG.MAX_UNIQUE_FANS + ' 位不同粉丝）...');
+  console.log('\n🔎 开始【全量扫描】：目标是账号当前的全部粉丝（以 Response 里的 real_fans_count 为准）。');
+  console.log('   没有人为数量上限，会一直滚动直到收集完整或抖音返回 has_more = false。');
   console.log('   滚动方式：真实鼠标滚轮输入（无需你手动碰鼠标）。');
+  console.log('   ⏹️  随时可按 Q 或 Ctrl+C 停止，程序会先保存再退出（下次可断点续扫）。');
   if (DEBUG_SCROLL) console.log('   [调试模式] 已开启：将给识别到的粉丝区域画红框并打印详细日志。');
   console.log('');
 
@@ -166,31 +202,39 @@ async function main(): Promise<void> {
   let firstInteraction = true;
   let stopReason = '';
   scanStarted = true;
+  enableQuitKey();
 
   for (let round = 0; round < CONFIG.MAX_SCROLL_ROUNDS; round += 1) {
+    // —— 用户主动停止 ——
     if (stopRequested) {
       stopReason = '用户手动停止';
       break;
     }
-    if (store.size >= CONFIG.MAX_UNIQUE_FANS) {
-      stopReason = `已达上限 ${CONFIG.MAX_UNIQUE_FANS} 位粉丝`;
+
+    // —— 正常完成条件（任一）——
+    if (realFansCount !== null && store.size >= realFansCount) {
+      completed = true;
+      stopReason = `已收集到全部 ${formatNumber(realFansCount)} 位粉丝`;
       break;
     }
     if (noMoreFlag) {
-      stopReason = '抖音返回 has_more = false（已到底）';
+      completed = true;
+      stopReason = '抖音返回 has_more = false（粉丝列表已到底，全部加载完成）';
       break;
     }
 
-    // 验证 / 风控检测
+    // —— 安全 / 异常停止条件 ——
     const kw = await detectVerification(page);
     if (kw) {
       stopReason = `检测到疑似安全验证（关键词：${kw}），已停止，不做任何绕过`;
       break;
     }
-
-    // 长时间没有新增粉丝
-    if (Date.now() - lastNewFanAt > CONFIG.NO_NEW_FANS_TIMEOUT_MS) {
-      stopReason = '较长时间没有新增粉丝，判定已到底或加载停滞';
+    if (listener.consecutiveFailures >= CONFIG.FOLLOWER_LIST_FAIL_LIMIT) {
+      stopReason = `follower/list 接口连续失败 ${listener.consecutiveFailures} 次，判定异常`;
+      break;
+    }
+    if (Date.now() - lastResponseAt > CONFIG.NO_NEW_FANS_TIMEOUT_MS) {
+      stopReason = '较长时间没有再收到新的粉丝列表响应，判定已到底或加载停滞';
       break;
     }
 
@@ -251,14 +295,26 @@ async function main(): Promise<void> {
   }
 
   if (!stopReason) stopReason = '达到最大滚动次数保护上限';
-  console.log(`\n🛑 扫描结束：${stopReason}`);
+
+  const totalStr = realFansCount !== null ? String(realFansCount) : '未知';
+  if (completed) {
+    console.log(`\n✅ 扫描完成：${stopReason}`);
+    console.log(`   已保存 ${store.size} / ${totalStr}`);
+  } else {
+    console.log(`\n🛑 扫描暂停：${stopReason}`);
+    console.log(`   扫描暂停：已保存 ${store.size} / ${totalStr}`);
+    if (!userStopped) {
+      console.log('   数据已保存，下次运行会自动读取并从粉丝列表顶部续扫（已有用户自动跳过）。');
+    }
+  }
 
   await finish();
 
   async function finish(): Promise<void> {
+    keypressCleanup();
     listener.stop();
     saveOutputs(outputDir, store, realFansCount, listener.capturedCount);
-    printSummary(store, realFansCount, listener.capturedCount, outputDir);
+    printSummary(store, realFansCount, listener.capturedCount, outputDir, completed);
     process.off('SIGINT', onSigint);
     await context.close().catch(() => undefined);
   }
@@ -266,7 +322,7 @@ async function main(): Promise<void> {
 
 let lastProgressLine = '';
 function printProgress(store: FanStore, realFansCount: number | null, captured: number): void {
-  const total = realFansCount !== null ? formatNumber(realFansCount) : '未知';
+  const total = realFansCount !== null ? String(realFansCount) : '未知';
   const top = store.top();
   let line = `已收集 ${store.size} / ${total} | 捕获接口 ${captured} 次`;
   if (top) {
@@ -283,10 +339,12 @@ function printSummary(
   realFansCount: number | null,
   captured: number,
   outputDir: string,
+  completed: boolean,
 ): void {
   console.log('\n================ 扫描汇总 ================');
+  console.log(`状态：${completed ? '✅ 全量扫描完成' : '🛑 已暂停（下次可自动续扫）'}`);
   console.log(`共收集不同粉丝：${store.size}`);
-  console.log(`抖音显示真实粉丝总数：${realFansCount !== null ? formatNumber(realFansCount) : '未读取到'}`);
+  console.log(`抖音显示真实粉丝总数：${realFansCount !== null ? String(realFansCount) : '未读取到'}`);
   console.log(`捕获粉丝列表接口次数：${captured}`);
   const top = store.top();
   if (top) {

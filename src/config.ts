@@ -1,16 +1,22 @@
 /**
  * 全局可调参数集中管理。
- * 第一阶段严格限制 MAX_UNIQUE_FANS = 200，后续可手工调整。
+ * 全量扫描模式：不设人为数量上限，目标总数取自 Response 的 real_fans_count。
  */
 export const CONFIG = {
   /** 抖音首页 */
   START_URL: 'https://www.douyin.com/',
 
-  /** 第一阶段硬上限：最多收集多少个不同粉丝 */
-  MAX_UNIQUE_FANS: 200,
+  /**
+   * 全量扫描模式：不设人为数量上限。
+   * 扫描目标总数来自 Response 里的 real_fans_count；
+   * 正常完成条件为「已收集 >= real_fans_count」或「has_more === false」。
+   */
 
   /** 只处理 URL 中包含该子串的 Response（不硬编码完整 URL） */
   FOLLOWER_LIST_PATH: '/aweme/v1/web/user/follower/list/',
+
+  /** follower/list 连续失败多少次就判定异常并暂停（保存后退出） */
+  FOLLOWER_LIST_FAIL_LIMIT: 5,
 
   /** 浏览器 profile 目录（真实 Chrome 用，保存登录态，绝不提交到仓库） */
   PROFILE_DIR: '.browser-profile',
