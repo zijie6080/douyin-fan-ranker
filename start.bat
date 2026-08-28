@@ -1,10 +1,13 @@
 @echo off
 chcp 65001 >nul
+cd /d "%~dp0"
 setlocal
 
 echo ============================================
 echo   抖音粉丝分析工具 (Douyin Fan Ranker)
 echo ============================================
+echo.
+echo 当前目录: %cd%
 echo.
 
 REM 1. 检查 Node.js 是否安装

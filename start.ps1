@@ -4,10 +4,13 @@
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Set-Location -Path $PSScriptRoot
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  抖音粉丝分析工具 (Douyin Fan Ranker)" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "当前目录: $((Get-Location).Path)"
 Write-Host ""
 
 # 1. 检查 Node.js
