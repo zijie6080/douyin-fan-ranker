@@ -21,6 +21,15 @@ import { PopupToBackground, PanelInfo } from '../lib/messages';
 import { Fan, ScanState, ScanStatus, RunMode, StopReason, DiagnosticEntry, DiagnosticReport } from '../lib/types';
 import { findFollowerPanelEl } from '../lib/panel';
 import { diagnosisText } from '../lib/diagnostic';
+import {
+  isDetachError,
+  detachReasonLabel,
+  mentionsDevtools,
+  canReconnect,
+  detachStopMessage,
+  RECONNECT_BACKOFFS,
+  MAX_TOTAL_RECONNECTS,
+} from '../lib/reconnect';
 
 // ---------------- 全局扫描状态 ----------------
 let db: IDBDatabase | null = null;
@@ -34,6 +43,12 @@ let statusText: ScanStatus = 'idle';
 let message = '';
 let accountName: string | undefined;
 let finalized = false; // 保证一次扫描只结算 / 下载一次
+
+// ---------------- debugger 生命周期 ----------------
+let attached = false; // 当前是否已附着 debugger
+let reconnecting = false; // 正在重连中（避免并发重连）
+let detachReason = ''; // 最近一次 onDetach 的 reason
+let reconnectTotal = 0; // 本次扫描累计重连次数
 
 // 运行模式与诊断状态
 let mode: RunMode = 'scan';
@@ -54,8 +69,33 @@ function cdp<T = unknown>(method: string, params?: object): Promise<T> {
     if (tabId === null) return reject(new Error('no tab'));
     chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
       const err = chrome.runtime.lastError;
-      if (err) reject(new Error(err.message));
-      else resolve(result as T);
+      if (err) {
+        // 命令执行时会话断开 → 标记未附着，交由主循环触发重连（不当作普通失败）
+        if (isDetachError(err.message)) attached = false;
+        reject(new Error(err.message));
+      } else {
+        resolve(result as T);
+      }
+    });
+  });
+}
+
+/** 读取标签页信息（用于重连前确认仍在 douyin.com） */
+function getTab(id: number): Promise<chrome.tabs.Tab | null> {
+  return new Promise((resolve) => {
+    chrome.tabs.get(id, (tab) => {
+      if (chrome.runtime.lastError) resolve(null);
+      else resolve(tab ?? null);
+    });
+  });
+}
+
+/** 尝试附着一次 debugger + Network.enable，成功返回 true */
+function attachOnce(id: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    chrome.debugger.attach({ tabId: id }, '1.3', () => {
+      if (chrome.runtime.lastError) resolve(false);
+      else resolve(true);
     });
   });
 }
@@ -309,12 +349,73 @@ async function jsScrollPanel(): Promise<void> {
   await cdp('Runtime.evaluate', { expression: expr, returnByValue: true }).catch(() => undefined);
 }
 
+// ---------------- debugger 掉线自动重连 ----------------
+/**
+ * 调试连接断开后自动恢复：确认标签页仍在 douyin.com → 有限退避重试 attach →
+ * 重新 Network.enable + 清理陈旧 requestId/等待者 → 继续扫描。全程不清空已抓数据。
+ * @returns 恢复成功 true；无法恢复（标签页没了 / 多次失败）false。
+ */
+async function reconnect(): Promise<boolean> {
+  if (reconnecting) return attached;
+  reconnecting = true;
+  reconnectTotal += 1;
+
+  message = `调试连接已断开（${detachReasonLabel(detachReason)}），正在恢复……`;
+  if (mentionsDevtools(detachReason)) {
+    message += '｜扫描期间请关闭该抖音标签页的开发者工具。';
+  }
+  broadcast();
+
+  await detachDebugger().catch(() => undefined); // 干净断开，避免“已附着”冲突
+
+  if (reconnectTotal > MAX_TOTAL_RECONNECTS) {
+    reconnecting = false;
+    return false;
+  }
+
+  // 标签页还在吗？还在 douyin 吗？
+  const tab = tabId !== null ? await getTab(tabId) : null;
+  if (!canReconnect(tab)) {
+    reconnecting = false;
+    return false;
+  }
+
+  for (let i = 0; i < RECONNECT_BACKOFFS.length && scanning; i += 1) {
+    await delay(RECONNECT_BACKOFFS[i]);
+    const ok = tabId !== null && (await attachOnce(tabId));
+    if (ok) {
+      await cdp('Network.enable').catch(() => undefined);
+      attached = true;
+      wantedRequests.clear(); // 断开前的在途 requestId 已失效
+      responseResolvers = []; // 丢弃陈旧等待者
+      firstInteraction = true; // 重新用移动+点击激活滚动
+      lastProbeError = '';
+      reconnecting = false;
+      message = '调试连接已恢复，继续扫描……';
+      broadcast();
+      return true;
+    }
+  }
+  reconnecting = false;
+  return false;
+}
+
 // ---------------- 扫描主循环（事件驱动）----------------
 async function scanLoop(): Promise<void> {
   let stall = 0;
   const giveUpAt = SCAN_CONFIG.STALL_BEFORE_RECOVERY + SCAN_CONFIG.RECOVERY_ATTEMPTS;
 
   for (let round = 0; scanning && round < SCAN_CONFIG.MAX_WHEEL_ROUNDS; round += 1) {
+    // 调试连接断开 → 先自动重连，成功后继续；彻底无法恢复才停止（区分于 no_new_data）
+    if (!attached) {
+      const ok = await reconnect();
+      if (!ok) {
+        const tab = tabId !== null ? await getTab(tabId) : null;
+        return finalize('stopped', detachStopMessage(detachReason, !canReconnect(tab)), 'debugger_detached');
+      }
+      continue;
+    }
+
     // 正常完成条件
     if (hasMore === false) {
       return finalize('completed', '抖音返回 has_more=false，粉丝列表已全部加载', 'has_more_false');
@@ -324,6 +425,7 @@ async function scanLoop(): Promise<void> {
     }
 
     const info = await getPanel();
+    if (!attached) continue; // 探测时掉线 → 下一轮触发重连，不误判为找不到面板
     if (info?.accountName) accountName = info.accountName;
 
     // 安全 / 验证检测：立即停止，不绕过
@@ -341,10 +443,12 @@ async function scanLoop(): Promise<void> {
 
     const prevScrollTop = info.scrollTop ?? -1;
     await dispatchWheel(info.rect);
+    if (!attached) continue; // 发滚轮时掉线 → 触发重连
 
     const inRecovery = stall >= SCAN_CONFIG.STALL_BEFORE_RECOVERY;
     const waitMs = inRecovery ? SCAN_CONFIG.RECOVERY_WAIT_MS : SCAN_CONFIG.RESPONSE_WAIT_MS;
     const got = await waitForResponse(waitMs);
+    if (!attached) continue; // 等待期间掉线 → 触发重连
 
     if (got) {
       stall = 0;
@@ -395,6 +499,10 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   firstInteraction = true;
   lastProbeError = '';
   lastStrategy = '';
+  attached = false;
+  reconnecting = false;
+  detachReason = '';
+  reconnectTotal = 0;
   wantedRequests.clear();
   responseResolvers = [];
 
@@ -408,22 +516,16 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   }
 
   // 附着 debugger
-  try {
-    await new Promise<void>((resolve, reject) => {
-      chrome.debugger.attach({ tabId: id }, '1.3', () => {
-        const err = chrome.runtime.lastError;
-        if (err) reject(new Error(err.message));
-        else resolve();
-      });
-    });
-    await cdp('Network.enable');
-  } catch (e) {
+  const ok = await attachOnce(id);
+  if (!ok) {
     statusText = 'error';
-    message = `无法附着调试器：${e instanceof Error ? e.message : String(e)}。请关闭该标签页已打开的 DevTools 后重试。`;
+    message = '无法附着调试器（该标签页可能已打开开发者工具，或被其他调试器占用）。请关闭该标签页的开发者工具后重试。';
     scanning = false;
     broadcast();
     return;
   }
+  await cdp('Network.enable').catch(() => undefined);
+  attached = true;
 
   scanning = true;
   broadcast();
@@ -473,6 +575,8 @@ async function finalizeDiagnose(reason: StopReason): Promise<void> {
     timeline,
     probeStrategy: lastStrategy || undefined,
     probeError: lastProbeError || undefined,
+    detachReason: detachReason || undefined,
+    reconnectCount: reconnectTotal || undefined,
   };
   diagnosis = diagnosisText(report);
   const stamp = fileStamp();
@@ -533,9 +637,14 @@ function triggerDownload(url: string, filename: string): Promise<void> {
 }
 
 // 用户在 DevTools 提示条点“取消”会触发 detach：视为停止并保存
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId === tabId && scanning) {
-    void finalize('stopped', '调试会话已断开（可能点了停止调试提示），已保存当前数据', 'debugger_detached');
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId !== tabId) return;
+  attached = false;
+  detachReason = String(reason || '');
+  // 扫描中：不立即停止，交给主循环触发自动重连（区分于 no_new_data）
+  if (scanning) {
+    message = `调试连接已断开（${detachReasonLabel(detachReason)}），正在恢复……`;
+    broadcast();
   }
 });
 

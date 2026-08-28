@@ -85,6 +85,10 @@ export interface DiagnosticReport {
   probeStrategy?: string;
   /** 面板探测报错（若有） */
   probeError?: string;
+  /** 最近一次调试连接断开原因（若发生过） */
+  detachReason?: string;
+  /** 本次扫描累计自动重连次数 */
+  reconnectCount?: number;
 }
 
 /** 广播给 popup 的实时扫描状态 */
