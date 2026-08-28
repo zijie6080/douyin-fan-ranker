@@ -22,10 +22,14 @@ import {
 } from './storage';
 import {
   detectVerification,
-  findContainerSelector,
-  scrollOnce,
-  waitAfterScroll,
+  findFollowerPanel,
+  wheelScrollOnce,
+  waitAfterWheel,
+  getScrollTop,
+  domScrollOnce,
+  dbg,
 } from './scroller';
+import { DEBUG_SCROLL } from './config';
 import { formatNumber } from './utils';
 
 /** 等待用户在终端按 Enter */
@@ -99,24 +103,27 @@ async function main(): Promise<void> {
   console.log('   3) 点击「粉丝」，确认粉丝列表已经显示出来');
   await waitForEnter('\n完成后回到终端按 Enter 开始扫描... ');
 
-  console.log('\n🔎 开始扫描（最多收集 ' + CONFIG.MAX_UNIQUE_FANS + ' 位不同粉丝）...\n');
+  console.log('\n🔎 开始扫描（最多收集 ' + CONFIG.MAX_UNIQUE_FANS + ' 位不同粉丝）...');
+  console.log('   滚动方式：真实鼠标滚轮输入（无需你手动碰鼠标）。');
+  if (DEBUG_SCROLL) console.log('   [调试模式] 已开启：将给识别到的粉丝区域画红框并打印详细日志。');
+  console.log('');
 
-  // 定位滚动容器
-  let selector = await findContainerSelector(page);
-  if (!selector) {
-    console.log('⚠️  暂时没有识别到粉丝列表滚动容器。');
-    console.log('   请确认粉丝弹窗已打开、鼠标已在列表上滚动过一次，然后按 Enter 重试...');
+  // 定位粉丝面板（含 bounding box），失败给一次重试机会
+  let panel = await findFollowerPanel(page);
+  if (!panel) {
+    console.log('⚠️  暂时没有识别到粉丝列表区域。');
+    console.log('   请确认粉丝弹窗已打开、能看到粉丝头像和名字，然后按 Enter 重试...');
     await waitForEnter('');
-    selector = await findContainerSelector(page);
+    panel = await findFollowerPanel(page);
   }
-  if (!selector) {
-    console.log('❌ 仍未找到可滚动的粉丝列表容器，停止。已保存现有数据。');
+  if (!panel) {
+    console.log('❌ 仍未找到可滚动的粉丝列表区域，停止。已保存现有数据。');
     await finish();
     return;
   }
 
-  let prevTop = 0;
-  let noProgressCount = 0;
+  let noProgressRounds = 0;
+  let firstInteraction = true;
   let stopReason = '';
 
   for (let round = 0; round < CONFIG.MAX_SCROLL_ROUNDS; round += 1) {
@@ -146,30 +153,60 @@ async function main(): Promise<void> {
       break;
     }
 
-    const state = await scrollOnce(page, selector, prevTop);
-    if (!state.found) {
-      // 容器可能被重建，重新定位一次
-      const again = await findContainerSelector(page);
-      if (again) {
-        selector = again;
-        continue;
-      }
-      stopReason = '粉丝列表滚动容器丢失（页面可能已变化）';
+    // 每轮重新定位面板，应对虚拟列表 / React 重渲染导致的节点变化
+    if (round % CONFIG.RELOCATE_EVERY_ROUNDS === 0) {
+      const relocated = await findFollowerPanel(page);
+      if (relocated) panel = relocated;
+    }
+    if (!panel) {
+      stopReason = '粉丝列表区域丢失（页面可能已变化）';
       break;
     }
 
-    if (!state.moved) {
-      noProgressCount += 1;
-      if (noProgressCount >= CONFIG.NO_SCROLL_PROGRESS_LIMIT) {
-        stopReason = '多次滚动位置不再变化，判定已到底';
+    // 以“是否产生新的 follower/list Response”作为滚动成功标准
+    const before = listener.capturedCount;
+    const scrollTopBefore = await getScrollTop(page, panel.selector);
+    let gotNew = false;
+
+    for (let attempt = 1; attempt <= CONFIG.WHEEL_ATTEMPTS_PER_ROUND; attempt += 1) {
+      await wheelScrollOnce(page, panel, firstInteraction);
+      firstInteraction = false;
+      await waitAfterWheel();
+      if (listener.capturedCount > before) {
+        gotNew = true;
+        if (DEBUG_SCROLL) dbg(`第 ${attempt} 次滚轮后捕获到新的 follower/list Response ✔`);
         break;
       }
-    } else {
-      noProgressCount = 0;
+      if (DEBUG_SCROLL) dbg(`wheel sent, no new follower response, attempt ${attempt}/${CONFIG.WHEEL_ATTEMPTS_PER_ROUND}`);
     }
-    prevTop = state.scrollTop;
 
-    await waitAfterScroll();
+    const scrollTopAfter = await getScrollTop(page, panel.selector);
+    const moved = scrollTopAfter !== scrollTopBefore;
+
+    if (gotNew) {
+      noProgressRounds = 0;
+    } else if (moved) {
+      // 面板确实滚动了，只是这一轮还没触发新请求（可能尚未接近底部）——继续
+      noProgressRounds = 0;
+      if (DEBUG_SCROLL) dbg(`本轮无新请求，但 scrollTop 变化 ${scrollTopBefore} → ${scrollTopAfter}，继续`);
+    } else {
+      // 滚轮既没带来新请求、scrollTop 也没变：可能到底，或滚轮未生效
+      noProgressRounds += 1;
+      if (DEBUG_SCROLL) dbg(`本轮无新请求且 scrollTop 未变化（${noProgressRounds}/${CONFIG.NO_SCROLL_PROGRESS_LIMIT}）`);
+      // 兜底：尝试一次 DOM scrollTop，作为真实滚轮无效时的最后手段
+      const domMoved = await domScrollOnce(page, panel.selector);
+      if (domMoved) {
+        await waitAfterWheel();
+        if (listener.capturedCount > before) {
+          noProgressRounds = 0;
+          if (DEBUG_SCROLL) dbg('兜底 DOM 滚动后捕获到新请求 ✔');
+        }
+      }
+      if (noProgressRounds >= CONFIG.NO_SCROLL_PROGRESS_LIMIT) {
+        stopReason = '连续多轮滚动既无新数据、位置也不变，判定已到底或无法继续加载';
+        break;
+      }
+    }
   }
 
   if (!stopReason) stopReason = '达到最大滚动次数保护上限';
