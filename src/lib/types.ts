@@ -15,6 +15,10 @@ export interface Fan {
   awemeCount?: number;
   signature?: string;
   avatarUrl?: string;
+  /** 首次发现时间（ms epoch） */
+  firstSeenAt?: number;
+  /** 最近一次数据更新时间（ms epoch） */
+  lastUpdatedAt?: number;
 }
 
 /** 从 follower/list Response 顶层解析出的分页 / 统计信息（全部可选） */
@@ -42,8 +46,15 @@ export interface FansSnapshot {
   fans: Fan[];
 }
 
-/** 运行模式：正常扫描导出 Excel / 全自动分页诊断 / 终局诊断 */
-export type RunMode = 'scan' | 'diagnose' | 'final';
+/**
+ * 运行模式：
+ * - scan：完整扫描（Full Scan）导出 Excel
+ * - incremental：增量扫描（只更新新粉丝）
+ * - perftest：性能测试（跑到 PERF_TEST_LIMIT 后出性能报告）
+ * - diagnose：全自动分页诊断
+ * - final：终局诊断
+ */
+export type RunMode = 'scan' | 'incremental' | 'perftest' | 'diagnose' | 'final';
 
 /** 扫描状态机 */
 export type ScanStatus = 'idle' | 'scanning' | 'completed' | 'stopped' | 'error';
@@ -116,9 +127,24 @@ export interface ScanState {
   stopReason: StopReason | null;
   /** 诊断模式结束后的人类可读结论（两段合一） */
   diagnosis: string;
+  /** 是否已完成过一次完整扫描（决定 popup 显示“完整扫描”还是“更新新粉丝”） */
+  baselineCompleted: boolean;
 }
 
-/** 数据概览（Excel 第二个 sheet 用） */
+/** 扫描概览（Excel 第二个 sheet 用） */
+export interface ScanSummary {
+  displayedFollowerCount: number | null;
+  webVisibleUniqueFans: number;
+  coveragePercent: string;
+  newThisScan: number;
+  updatedThisScan: number;
+  requests: number;
+  elapsedMs: number;
+  fansPerMinute: number;
+  finalHasMore: boolean | null;
+}
+
+/** 数据分层（Excel 第三个 sheet 用） */
 export interface Overview {
   realFansCount: number | null;
   scanned: number;

@@ -15,7 +15,11 @@ import { FanStore } from '../lib/dedup';
 import { parseFollowerResponse } from '../lib/parser';
 import { buildOverview } from '../lib/overview';
 import { buildWorkbookBuffer, buildFileName } from '../lib/xlsx';
-import { openDb, getAllFans, putFans, setMeta } from '../lib/db';
+import { openDb, getAllFans, putFans, setMeta, getMeta } from '../lib/db';
+import { PerfTracker, PerfSample } from '../lib/perf';
+import { computeCoverage } from '../lib/coverage';
+import { shouldStopIncremental } from '../lib/incremental';
+import { ScanSummary } from '../lib/types';
 import { SCAN_CONFIG, VERIFICATION_KEYWORDS } from '../lib/scan-config';
 import { PopupToBackground, PanelInfo } from '../lib/messages';
 import { Fan, ScanState, ScanStatus, RunMode, StopReason, DiagnosticEntry, DiagnosticReport } from '../lib/types';
@@ -65,6 +69,31 @@ let responseResolvers: Array<() => void> = [];
 // 终局诊断引擎（仅 final 模式创建）
 let engine: FinalDiagnosisEngine | null = null;
 const reqUrlById = new Map<string, string>(); // requestId → 命中路径的请求 URL（final 模式）
+
+// ---------------- V2 性能 / 网络驱动 / 增量 状态 ----------------
+let perf: PerfTracker | null = null;
+let scanStartAt = 0;
+let newThisScan = 0; // 本次扫描新增
+let updatedThisScan = 0; // 本次扫描更新已存在
+let displayedFollowerCount: number | null = null; // 主页显示粉丝（= real_fans_count）
+let requestResolvers: Array<() => void> = []; // 等待“下一个 follower/list 请求出现”
+// 网络时间戳（用于 perf）
+let tLastWheel = 0;
+let tPrevRequestSent = 0;
+const reqSentAt = new Map<string, number>(); // requestId → 请求发出时刻
+const reqLatency = new Map<string, number>(); // requestId → networkLatency
+let pendingWheelToRequestMs = 0;
+let pendingRequestIntervalMs = 0;
+// 增量扫描计数
+let consecutiveKnown = 0;
+const recentNewCounts: number[] = []; // 最近 5 页的新增数
+// 其它 perf 输入
+let lastScrollHeight = 0;
+let pendingResponseToWheelMs = 0;
+// 广播节流
+let lastBroadcastAt = 0;
+// 是否已完成过一次完整扫描（供 popup 决定显示哪个按钮）
+let baselineCompleted = false;
 
 // ---------------- 工具 ----------------
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -202,11 +231,20 @@ function snapshotState(): ScanState {
     lastHasMore: hasMore,
     stopReason: stopReasonCode,
     diagnosis,
+    baselineCompleted,
   };
 }
 
-function broadcast(): void {
+function broadcastForce(): void {
+  lastBroadcastAt = Date.now();
   chrome.runtime.sendMessage({ type: 'PROGRESS', state: snapshotState() }).catch(() => undefined);
+}
+
+/** 热路径广播：最多每 BROADCAST_MIN_INTERVAL_MS 一次，popup 退出扫描热路径 */
+function broadcast(): void {
+  const now = Date.now();
+  if (now - lastBroadcastAt < SCAN_CONFIG.BROADCAST_MIN_INTERVAL_MS) return;
+  broadcastForce();
 }
 
 function abToBase64(buf: ArrayBuffer): string {
@@ -230,6 +268,7 @@ function decodeBody(body: string, base64Encoded: boolean): string {
 }
 
 async function handleResponseBody(text: string, requestId?: string): Promise<void> {
+  const tParse0 = Date.now();
   let json: unknown;
   try {
     json = JSON.parse(text);
@@ -242,16 +281,32 @@ async function handleResponseBody(text: string, requestId?: string): Promise<voi
   } catch {
     return;
   }
+  const parseMs = Date.now() - tParse0;
 
   captured += 1;
-  if (result.meta.realFansCount !== undefined) realFansCount = result.meta.realFansCount;
+  if (result.meta.realFansCount !== undefined) {
+    realFansCount = result.meta.realFansCount;
+    displayedFollowerCount = result.meta.realFansCount;
+  }
   if (result.meta.hasMore === false) hasMore = false;
   else if (result.meta.hasMore === true) hasMore = true;
   if (result.meta.maxTime !== undefined) lastMaxTime = result.meta.maxTime;
   if (result.meta.minTime !== undefined) lastMinTime = result.meta.minTime;
 
   const rawUserCount = result.fans.length;
-  const newFans: Fan[] = store.upsertManyReturningNew(result.fans);
+  const now = Date.now();
+  const tDedupe0 = Date.now();
+  const newFans: Fan[] = store.upsertManyReturningNew(result.fans, now);
+  const dedupeMs = Date.now() - tDedupe0;
+  const updatedCount = rawUserCount - newFans.length;
+  newThisScan += newFans.length;
+  updatedThisScan += updatedCount;
+
+  // 增量计数：本页无新增 → 累加连续已知；有新增 → 清零
+  if (newFans.length === 0) consecutiveKnown += rawUserCount;
+  else consecutiveKnown = 0;
+  recentNewCounts.push(newFans.length);
+  if (recentNewCounts.length > 5) recentNewCounts.shift();
 
   // 终局诊断：把解析结果（含 raw / newUnique 区分）喂给引擎
   if (engine && requestId) {
@@ -267,23 +322,48 @@ async function handleResponseBody(text: string, requestId?: string): Promise<voi
     });
   }
 
-  // 记录诊断快照（每捕获一次响应一条）
-  timeline.push({
-    uniqueFanCount: store.size,
-    hasMore,
-    realFansCount,
-    maxTime: result.meta.maxTime,
-    minTime: result.meta.minTime,
-    timestamp: Date.now(),
-  });
-  if (newFans.length > 0 && db) {
-    await putFans(db, newFans).catch(() => undefined);
-    await setMeta(db, 'progress', {
+  // 诊断快照只在 diagnose 模式记录（production 热路径不做，避免 O(n) 内存增长）
+  if (mode === 'diagnose') {
+    timeline.push({
+      uniqueFanCount: store.size,
+      hasMore,
       realFansCount,
-      captured,
-      collected: store.size,
-      at: Date.now(),
-    }).catch(() => undefined);
+      maxTime: result.meta.maxTime,
+      minTime: result.meta.minTime,
+      timestamp: Date.now(),
+    });
+  }
+
+  // IndexedDB 批量写入（一个事务）：full/perftest 只写新增；incremental 额外写本页
+  // 已存在用户的最新字段（follower_count 等可能变化），仍是小批量、单事务。
+  let toPersist = newFans;
+  if (mode === 'incremental') {
+    toPersist = result.fans.map((f) => store.getStored(f)).filter((x): x is Fan => !!x);
+  }
+  let dbMs = 0;
+  if (toPersist.length > 0 && db) {
+    const tDb0 = Date.now();
+    await putFans(db, toPersist).catch(() => undefined);
+    dbMs = Date.now() - tDb0;
+  }
+
+  // 性能采样（production / perftest 才有 perf）
+  if (perf) {
+    const networkLatencyMs = requestId ? reqLatency.get(requestId) ?? 0 : 0;
+    if (requestId) reqLatency.delete(requestId);
+    const sample: PerfSample = {
+      uniqueFansAfter: store.size,
+      parseMs,
+      dedupeMs,
+      dbMs,
+      networkLatencyMs,
+      responseToWheelMs: pendingResponseToWheelMs,
+      wheelToRequestMs: pendingWheelToRequestMs,
+      requestIntervalMs: pendingRequestIntervalMs,
+      scrollHeight: lastScrollHeight,
+    };
+    const cp = perf.record(sample, Date.now());
+    if (cp) console.log(perf.formatCheckpoint(cp));
   }
 
   // 唤醒等待“新响应”的滚动循环
@@ -310,16 +390,29 @@ function onDebuggerEvent(
   const now = Date.now();
 
   if (method === 'Network.requestWillBeSent') {
-    // 终局诊断：命中路径的请求一发出就记录（含分页游标）
     const url = p.request?.url || '';
     if (p.requestId && url.includes(SCAN_CONFIG.FOLLOWER_LIST_PATH)) {
       reqUrlById.set(p.requestId, url);
+      reqSentAt.set(p.requestId, now);
+      // perf：本次请求相对上次的间隔、以及从滚轮到请求的延迟（网络驱动核心信号）
+      pendingRequestIntervalMs = tPrevRequestSent > 0 ? now - tPrevRequestSent : 0;
+      pendingWheelToRequestMs = tLastWheel > 0 ? now - tLastWheel : 0;
+      tPrevRequestSent = now;
       if (engine) engine.onRequest(p.requestId, url, now);
+      // 网络驱动：唤醒“等待下一页请求”的滚动循环
+      const rs = requestResolvers;
+      requestResolvers = [];
+      rs.forEach((r) => r());
     }
   } else if (method === 'Network.responseReceived') {
     const url = p.response?.url || '';
     if (p.requestId && url.includes(SCAN_CONFIG.FOLLOWER_LIST_PATH)) {
       wantedRequests.add(p.requestId);
+      const sentAt = reqSentAt.get(p.requestId);
+      if (sentAt !== undefined) {
+        reqLatency.set(p.requestId, now - sentAt);
+        reqSentAt.delete(p.requestId);
+      }
       if (engine) engine.onResponse(p.requestId, p.response?.status ?? 0, now);
     }
   } else if (method === 'Network.loadingFinished') {
@@ -357,7 +450,39 @@ function waitForResponse(ms: number): Promise<boolean> {
   });
 }
 
+/** 网络驱动核心：等待“下一个 follower/list 请求出现”（requestWillBeSent） */
+function waitForRequest(ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val: boolean): void => {
+      if (done) return;
+      done = true;
+      const i = requestResolvers.indexOf(resolver);
+      if (i >= 0) requestResolvers.splice(i, 1);
+      clearTimeout(timer);
+      resolve(val);
+    };
+    const resolver = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), ms);
+    requestResolvers.push(resolver);
+  });
+}
+
 let firstInteraction = true;
+let currentDelta: number = SCAN_CONFIG.WHEEL_DELTA_DEFAULT;
+
+async function dispatchWheelDelta(rect: { x: number; y: number; width: number; height: number }, deltaY: number): Promise<void> {
+  const x = rect.x + rect.width * SCAN_CONFIG.WHEEL_POINT_X_RATIO;
+  const y = rect.y + rect.height * SCAN_CONFIG.WHEEL_POINT_Y_RATIO;
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' }).catch(() => undefined);
+  if (firstInteraction) {
+    firstInteraction = false;
+    await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }).catch(() => undefined);
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }).catch(() => undefined);
+  }
+  tLastWheel = Date.now();
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY }).catch(() => undefined);
+}
 
 async function dispatchWheel(rect: { x: number; y: number; width: number; height: number }): Promise<void> {
   const x = rect.x + rect.width * SCAN_CONFIG.WHEEL_POINT_X_RATIO;
@@ -605,6 +730,86 @@ async function finalLoop(): Promise<void> {
   if (scanning) return finalize('stopped', '达到最大滚动保护上限（已生成诊断）', 'max_rounds');
 }
 
+// ---------------- V2 生产扫描主循环（网络驱动）----------------
+async function productionLoop(kind: 'full' | 'incremental' | 'perftest'): Promise<void> {
+  let noRequestRounds = 0;
+  let missStreak = 0;
+  currentDelta = SCAN_CONFIG.WHEEL_DELTA_DEFAULT;
+  const giveUp = SCAN_CONFIG.NO_REQUEST_GIVEUP_ROUNDS;
+
+  for (let round = 0; scanning && round < SCAN_CONFIG.MAX_WHEEL_ROUNDS; round += 1) {
+    if (!attached) {
+      const ok = await reconnect();
+      if (!ok) return finalize('stopped', '调试连接断开且多次重连失败（已保存）', 'debugger_detached');
+      continue;
+    }
+    // 完成：has_more=false（Full Scan 的成功标准）
+    if (hasMore === false) return finalize('completed', 'has_more=false，Web 可枚举粉丝已扫完', 'has_more_false');
+    // 性能测试上限
+    if (kind === 'perftest' && store.size >= SCAN_CONFIG.PERF_TEST_LIMIT) {
+      return finalize('completed', `性能测试完成（${SCAN_CONFIG.PERF_TEST_LIMIT} 人）`, 'reached_real_fans_count');
+    }
+    // 增量停止
+    if (kind === 'incremental') {
+      const newUsersInRecentPages = recentNewCounts.reduce((a, b) => a + b, 0);
+      if (shouldStopIncremental({ consecutiveKnown, pagesCompleted: captured, newUsersInRecentPages })) {
+        return finalize('completed', '增量扫描：已进入历史覆盖区，停止', 'reached_real_fans_count');
+      }
+    }
+
+    const panel = await getPanel();
+    if (!attached) continue;
+    if (panel?.verification) {
+      return finalize('error', `检测到疑似安全验证（${panel.verification}），已停止（不绕过）`, 'verification');
+    }
+    if (!panel || !panel.rect) {
+      noRequestRounds += 1;
+      if (noRequestRounds >= giveUp) return finalize('stopped', '未找到粉丝列表区域，已停止（已保存）', 'panel_not_found');
+      await delay(SCAN_CONFIG.RECOVERY_WAIT_MS);
+      continue;
+    }
+    lastScrollHeight = panel.scrollHeight ?? lastScrollHeight;
+
+    // 处理完上一页后极短稳定，再网络驱动地触发下一页
+    await delay(SCAN_CONFIG.STABILIZE_MS);
+    pendingResponseToWheelMs = SCAN_CONFIG.STABILIZE_MS;
+
+    // 网络驱动：发滚轮 → 等“下一个 follower/list 请求出现”，快速退避重试；出现即停滚。
+    let requestSeen = false;
+    for (const waitMs of SCAN_CONFIG.REQUEST_WAIT_BACKOFF_MS) {
+      if (!scanning || !attached) break;
+      await dispatchWheelDelta(panel.rect, currentDelta);
+      requestSeen = await waitForRequest(waitMs);
+      if (requestSeen) break;
+      missStreak += 1;
+      if (missStreak >= 2) currentDelta = SCAN_CONFIG.WHEEL_DELTA_BOOST; // 自适应加大
+    }
+
+    if (requestSeen) {
+      missStreak = 0;
+      currentDelta = SCAN_CONFIG.WHEEL_DELTA_DEFAULT;
+      noRequestRounds = 0;
+      // 最多 1 个 in-flight：等这次请求的响应被解析完再继续
+      await waitForResponse(SCAN_CONFIG.REQUEST_RESPONSE_WAIT_MS);
+      if (!attached) continue;
+    } else {
+      noRequestRounds += 1;
+      // 兜底：JS 直接滚一次再看是否触发请求
+      await jsScrollPanel();
+      const got = await waitForRequest(400);
+      if (got) {
+        await waitForResponse(SCAN_CONFIG.REQUEST_RESPONSE_WAIT_MS);
+        noRequestRounds = 0;
+        continue;
+      }
+      if (noRequestRounds >= giveUp) {
+        return finalize('stopped', 'Web 前端不再产生新的分页请求，判定已到底（已保存）', 'no_new_data_after_retries');
+      }
+    }
+  }
+  if (scanning) return finalize('stopped', '达到最大滚动保护上限（已保存）', 'max_rounds');
+}
+
 // ---------------- 生命周期 ----------------
 async function beginScan(id: number, runMode: RunMode): Promise<void> {
   if (scanning) return;
@@ -630,14 +835,39 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   reconnectTotal = 0;
   wantedRequests.clear();
   responseResolvers = [];
+  requestResolvers = [];
   reqUrlById.clear();
+  reqSentAt.clear();
+  reqLatency.clear();
   engine = runMode === 'final' ? new FinalDiagnosisEngine() : null;
+
+  // V2 perf / 增量状态复位
+  scanStartAt = Date.now();
+  newThisScan = 0;
+  updatedThisScan = 0;
+  displayedFollowerCount = null;
+  consecutiveKnown = 0;
+  recentNewCounts.length = 0;
+  tLastWheel = 0;
+  tPrevRequestSent = 0;
+  currentDelta = SCAN_CONFIG.WHEEL_DELTA_DEFAULT;
+  lastScrollHeight = 0;
+  lastBroadcastAt = 0;
+  const isProduction = runMode === 'scan' || runMode === 'incremental' || runMode === 'perftest';
+  perf = isProduction ? new PerfTracker(scanStartAt, runMode === 'perftest') : null;
 
   // 断点续扫：载入已有数据去重
   try {
     db = await openDb();
     const existing = await getAllFans(db);
     store.upsertMany(existing);
+    // 增量扫描：确认已有基线（Full Scan 完成过）
+    if (runMode === 'incremental') {
+      const baseline = await getMeta<{ baselineCompleted?: boolean }>(db, 'baseline');
+      if (!baseline?.baselineCompleted) {
+        message = '提示：尚未完成一次“完整扫描”，本次将按增量逻辑运行，建议先做一次完整扫描。';
+      }
+    }
   } catch {
     db = null;
   }
@@ -655,9 +885,12 @@ async function beginScan(id: number, runMode: RunMode): Promise<void> {
   attached = true;
 
   scanning = true;
-  broadcast();
+  broadcastForce();
   if (runMode === 'final') void finalLoop();
-  else void scanLoop();
+  else if (runMode === 'diagnose') void scanLoop();
+  else if (runMode === 'incremental') void productionLoop('incremental');
+  else if (runMode === 'perftest') void productionLoop('perftest');
+  else void productionLoop('full'); // scan
 }
 
 async function detachDebugger(): Promise<void> {
@@ -686,9 +919,75 @@ async function finalize(status: ScanStatus, msg: string, reason: StopReason): Pr
   } else if (mode === 'diagnose') {
     await finalizeDiagnose(reason);
   } else {
-    await finalizeScan();
+    await finalizeProduction();
   }
-  broadcast();
+  broadcastForce();
+}
+
+/** 生产扫描（scan/incremental/perftest）结束：一次性排序 + 导出 Excel + 概览 + 覆盖率 + 基线 */
+async function finalizeProduction(): Promise<void> {
+  try {
+    const sorted = store.sorted(); // 只在结束时排一次
+    const overview = buildOverview(sorted, displayedFollowerCount);
+    const coverage = computeCoverage(store.size, displayedFollowerCount);
+    const summary: ScanSummary = {
+      displayedFollowerCount,
+      webVisibleUniqueFans: store.size,
+      coveragePercent: coverage.ratePercent,
+      newThisScan,
+      updatedThisScan,
+      requests: captured,
+      elapsedMs: Date.now() - scanStartAt,
+      fansPerMinute:
+        Date.now() - scanStartAt > 0 ? Math.round((store.size / ((Date.now() - scanStartAt) / 60000)) || 0) : 0,
+      finalHasMore: hasMore,
+    };
+    diagnosis = `Web 覆盖率 ${coverage.ratePercent}（${store.size} / ${displayedFollowerCount ?? '未知'}）｜本次新增 ${newThisScan}，更新 ${updatedThisScan}`;
+
+    const buf = await buildWorkbookBuffer(sorted, overview, summary);
+    const xlsxName = buildFileName();
+    await triggerDownload(
+      `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${abToBase64(buf)}`,
+      xlsxName,
+    );
+    const snapshot = { summary, collected: sorted.length, generatedAt: new Date().toISOString(), fans: sorted };
+    await triggerDownload(
+      `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(snapshot, null, 2))}`,
+      xlsxName.replace(/\.xlsx$/, '_备份.json'),
+    );
+
+    // Full Scan 且到底 → 保存 baseline（供 Incremental）
+    if (mode === 'scan' && hasMore === false && db) {
+      await setMeta(db, 'baseline', {
+        baselineCompleted: true,
+        baselineCompletedAt: Date.now(),
+        totalWebVisibleFans: store.size,
+        oldestCursor: lastMinTime,
+        newestCursor: lastMaxTime,
+      }).catch(() => undefined);
+      baselineCompleted = true;
+    }
+
+    // 性能测试 → 额外下载 performance-report.json（分段对比）
+    if (mode === 'perftest' && perf) {
+      const report = {
+        limit: SCAN_CONFIG.PERF_TEST_LIMIT,
+        totalUnique: store.size,
+        elapsedMs: summary.elapsedMs,
+        segments: perf.buildSegments(),
+        checkpoints: perf.checkpoints,
+        generatedAt: new Date().toISOString(),
+      };
+      await triggerDownload(
+        `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(report, null, 2))}`,
+        `performance-report_${fileStamp()}.json`,
+      );
+    }
+
+    message += `｜覆盖率 ${coverage.ratePercent}`;
+  } catch (e) {
+    message += `｜导出失败：${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 /** 终局诊断：生成并下载 3 个文件（json / summary.txt / events.jsonl），给出分类结论 */
@@ -752,35 +1051,6 @@ async function finalizeDiagnose(reason: StopReason): Promise<void> {
 }
 
 /** 正常扫描：生成并下载 Excel（+ JSON 备份） */
-async function finalizeScan(): Promise<void> {
-  try {
-    const sorted = store.sorted();
-    const overview = buildOverview(sorted, realFansCount);
-    const buf = await buildWorkbookBuffer(sorted, overview);
-    const b64 = abToBase64(buf);
-    const xlsxName = buildFileName();
-    await triggerDownload(
-      `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${b64}`,
-      xlsxName,
-    );
-
-    const snapshot = {
-      collected: sorted.length,
-      realFansCount,
-      capturedResponses: captured,
-      generatedAt: new Date().toISOString(),
-      fans: sorted,
-    };
-    await triggerDownload(
-      `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(snapshot, null, 2))}`,
-      xlsxName.replace(/\.xlsx$/, '_备份.json'),
-    );
-    message += `｜已导出 ${sorted.length} 位粉丝到 Excel`;
-  } catch (e) {
-    message += `｜导出 Excel 失败：${e instanceof Error ? e.message : String(e)}`;
-  }
-}
-
 /** YYYY-MM-DD_HH-mm */
 function fileStamp(now = new Date()): string {
   const p = (n: number): string => String(n).padStart(2, '0');
@@ -811,12 +1081,61 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.debugger.onEvent.addListener(onDebuggerEvent);
 
+/** 不扫描，直接用 IndexedDB 已有数据导出排行榜 Excel */
+async function exportRankingFromDb(): Promise<void> {
+  try {
+    const d = db ?? (await openDb());
+    db = d;
+    const fans = await getAllFans(d);
+    const baseline = await getMeta<{ totalWebVisibleFans?: number; displayed?: number }>(d, 'baseline');
+    const overview = buildOverview(fans, null);
+    const coverage = computeCoverage(fans.length, baseline?.displayed ?? null);
+    const summary: ScanSummary = {
+      displayedFollowerCount: null,
+      webVisibleUniqueFans: fans.length,
+      coveragePercent: coverage.ratePercent,
+      newThisScan: 0,
+      updatedThisScan: 0,
+      requests: 0,
+      elapsedMs: 0,
+      fansPerMinute: 0,
+      finalHasMore: null,
+    };
+    const buf = await buildWorkbookBuffer(fans, overview, summary);
+    await triggerDownload(
+      `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${abToBase64(buf)}`,
+      buildFileName(),
+    );
+    message = `已从本地已存数据导出 ${fans.length} 位粉丝排行榜。`;
+    broadcastForce();
+  } catch (e) {
+    message = `导出失败：${e instanceof Error ? e.message : String(e)}`;
+    broadcastForce();
+  }
+}
+
+/** SW 启动时读取 baseline 标志（决定 popup 显示哪个主按钮） */
+async function loadBaselineFlag(): Promise<void> {
+  try {
+    const d = db ?? (await openDb());
+    db = d;
+    const baseline = await getMeta<{ baselineCompleted?: boolean }>(d, 'baseline');
+    baselineCompleted = !!baseline?.baselineCompleted;
+  } catch {
+    baselineCompleted = false;
+  }
+}
+void loadBaselineFlag();
+
 chrome.runtime.onMessage.addListener((msg: PopupToBackground, _sender, sendResponse) => {
   if (msg?.type === 'START_SCAN') {
     void beginScan(msg.tabId, msg.mode ?? 'scan');
     sendResponse(snapshotState());
   } else if (msg?.type === 'STOP_SCAN') {
     if (scanning) void finalize('stopped', '已停止并保存', 'user_stopped');
+    sendResponse(snapshotState());
+  } else if (msg?.type === 'EXPORT') {
+    void exportRankingFromDb();
     sendResponse(snapshotState());
   } else if (msg?.type === 'GET_STATE') {
     sendResponse(snapshotState());

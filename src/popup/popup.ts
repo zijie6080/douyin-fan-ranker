@@ -18,7 +18,11 @@ const el = {
   topName: $('top-name'),
   topCount: $('top-count'),
   hint: $('hint'),
-  start: $<HTMLButtonElement>('start'),
+  full: $<HTMLButtonElement>('full'),
+  incremental: $<HTMLButtonElement>('incremental'),
+  export: $<HTMLButtonElement>('export'),
+  rescan: $<HTMLButtonElement>('rescan'),
+  perftest: $<HTMLButtonElement>('perftest'),
   diagnose: $<HTMLButtonElement>('diagnose'),
   final: $<HTMLButtonElement>('final'),
   stop: $<HTMLButtonElement>('stop'),
@@ -61,9 +65,11 @@ function render(state: ScanState): void {
   }
 
   const scanning = state.status === 'scanning';
-  el.start.classList.toggle('hidden', scanning);
-  el.diagnose.classList.toggle('hidden', scanning);
-  el.final.classList.toggle('hidden', scanning);
+  // 首次显示“完整扫描”；完成过一次完整扫描后主按钮变“更新新粉丝”
+  el.full.classList.toggle('hidden', scanning || state.baselineCompleted);
+  el.incremental.classList.toggle('hidden', scanning || !state.baselineCompleted);
+  el.export.classList.toggle('hidden', scanning);
+  (el.rescan.parentElement as HTMLElement).classList.toggle('hidden', scanning); // 隐藏高级选项 details
   el.stop.classList.toggle('hidden', !scanning);
 
   const diagnoseMode = state.mode === 'diagnose' || state.mode === 'final';
@@ -101,9 +107,10 @@ function render(state: ScanState): void {
     el.dText.textContent = state.diagnosis || '';
   }
 
-  el.start.disabled = !tabIsDouyin;
-  el.diagnose.disabled = !tabIsDouyin;
-  el.final.disabled = !tabIsDouyin;
+  for (const b of [el.full, el.incremental, el.rescan, el.perftest, el.diagnose, el.final]) {
+    b.disabled = !tabIsDouyin;
+  }
+  el.export.disabled = false; // 导出不需要在抖音页
 }
 
 async function init(): Promise<void> {
@@ -119,17 +126,23 @@ async function init(): Promise<void> {
 
 async function startWithMode(mode: RunMode): Promise<void> {
   if (currentTabId === null) return;
-  el.start.disabled = true;
-  el.diagnose.disabled = true;
-  el.final.disabled = true;
+  for (const b of [el.full, el.incremental, el.rescan, el.perftest, el.diagnose, el.final]) b.disabled = true;
   el.diag.classList.add('hidden');
   const state = await send({ type: 'START_SCAN', tabId: currentTabId, mode });
   if (state) render(state);
 }
 
-el.start.addEventListener('click', () => startWithMode('scan'));
+el.full.addEventListener('click', () => startWithMode('scan'));
+el.incremental.addEventListener('click', () => startWithMode('incremental'));
+el.rescan.addEventListener('click', () => startWithMode('scan'));
+el.perftest.addEventListener('click', () => startWithMode('perftest'));
 el.diagnose.addEventListener('click', () => startWithMode('diagnose'));
 el.final.addEventListener('click', () => startWithMode('final'));
+
+el.export.addEventListener('click', async () => {
+  const state = await send({ type: 'EXPORT' });
+  if (state) render(state);
+});
 
 el.stop.addEventListener('click', async () => {
   const state = await send({ type: 'STOP_SCAN' });

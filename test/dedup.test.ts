@@ -54,6 +54,41 @@ describe('排序', () => {
   });
 });
 
+describe('O(1) top 与时间戳', () => {
+  it('top 增量维护，插入/更新后都正确', () => {
+    const s = new FanStore();
+    s.upsert(fan({ secUid: 'a', followerCount: 100 }));
+    s.upsert(fan({ secUid: 'b', followerCount: 900 }));
+    s.upsert(fan({ secUid: 'c', followerCount: 50 }));
+    expect(s.top()!.secUid).toBe('b');
+    // 更新最高者的数据
+    s.upsert(fan({ secUid: 'b', nickname: '乙2', followerCount: 950 }));
+    expect(s.top()!.followerCount).toBe(950);
+    // 新来一个更高的
+    s.upsert(fan({ secUid: 'd', followerCount: 2000 }));
+    expect(s.top()!.secUid).toBe('d');
+  });
+
+  it('提供 now 时打 firstSeenAt / lastUpdatedAt', () => {
+    const s = new FanStore();
+    s.upsert(fan({ secUid: 'a', followerCount: 1 }), 1000);
+    let f = s.values()[0];
+    expect(f.firstSeenAt).toBe(1000);
+    expect(f.lastUpdatedAt).toBe(1000);
+    s.upsert(fan({ secUid: 'a', followerCount: 2 }), 2000);
+    f = s.values()[0];
+    expect(f.firstSeenAt).toBe(1000); // 首次发现保留最早
+    expect(f.lastUpdatedAt).toBe(2000);
+  });
+
+  it('has(fan) O(1) 判定是否已存在', () => {
+    const s = new FanStore();
+    s.upsert(fan({ secUid: 'a', followerCount: 1 }));
+    expect(s.has(fan({ secUid: 'a' }))).toBe(true);
+    expect(s.has(fan({ secUid: 'z' }))).toBe(false);
+  });
+});
+
 describe('profileUrl', () => {
   it('有 secUid 生成主页链接，无则空', () => {
     expect(profileUrl(fan({ secUid: 'MS4_x' }))).toBe('https://www.douyin.com/user/MS4_x');

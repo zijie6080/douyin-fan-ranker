@@ -7,6 +7,7 @@ import { RunMode, ScanState } from './types';
 export type PopupToBackground =
   | { type: 'START_SCAN'; tabId: number; mode?: RunMode }
   | { type: 'STOP_SCAN' }
+  | { type: 'EXPORT' } // 不扫描，直接用 IndexedDB 已有数据导出 Excel
   | { type: 'GET_STATE' };
 
 /** background → popup（响应 GET_STATE，或主动广播进度） */

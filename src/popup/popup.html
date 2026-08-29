@@ -27,10 +27,18 @@
 
       <div id="hint" class="hint">请在抖音打开自己的「粉丝」列表后再开始。</div>
 
-      <button id="start" class="btn primary">开始扫描全部粉丝</button>
-      <button id="diagnose" class="btn ghost">开始诊断（自动滚到底）</button>
-      <button id="final" class="btn ghost">开始终局诊断（查清为什么停止）</button>
+      <button id="full" class="btn primary">完整扫描可见粉丝</button>
+      <button id="incremental" class="btn primary hidden">更新新粉丝</button>
+      <button id="export" class="btn ghost">导出排行榜</button>
       <button id="stop" class="btn danger hidden">停止并保存</button>
+
+      <details class="adv">
+        <summary>高级选项</summary>
+        <button id="rescan" class="btn ghost">重新完整扫描</button>
+        <button id="perftest" class="btn ghost">性能测试（前 3000 人）</button>
+        <button id="diagnose" class="btn ghost">全自动分页诊断</button>
+        <button id="final" class="btn ghost">终局诊断（查清为什么停止）</button>
+      </details>
 
       <div id="message" class="message hidden"></div>
 

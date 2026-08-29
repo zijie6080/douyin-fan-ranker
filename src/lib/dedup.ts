@@ -26,6 +26,8 @@ export function mergeFan(prev: Fan, next: Fan): Fan {
     awemeCount: next.awemeCount ?? prev.awemeCount,
     signature: next.signature ?? prev.signature,
     avatarUrl: next.avatarUrl ?? prev.avatarUrl,
+    firstSeenAt: prev.firstSeenAt ?? next.firstSeenAt, // 首次发现时间保留最早
+    lastUpdatedAt: next.lastUpdatedAt ?? prev.lastUpdatedAt,
   };
 }
 
@@ -45,49 +47,75 @@ export function profileUrl(fan: Fan): string {
   return '';
 }
 
-/** 内存去重容器 */
+/** 内存去重容器。热路径 O(1)：top() 增量维护，不再每次排序全表。 */
 export class FanStore {
   private map = new Map<string, Fan>();
+  private topFan: Fan | undefined; // 增量维护的粉丝数最高者（O(1) top）
 
   get size(): number {
     return this.map.size;
   }
 
-  /** @returns true 表示新粉丝，false 表示更新已存在 */
-  upsert(fan: Fan): boolean {
+  /**
+   * 加入 / 更新一个粉丝。
+   * @param now 可选时间戳；提供时会打 firstSeenAt(新)/lastUpdatedAt(每次)。
+   * @returns true 表示新粉丝，false 表示更新已存在。
+   */
+  upsert(fan: Fan, now?: number): boolean {
     const key = dedupKey(fan);
     const existed = this.map.has(key);
+    let stored: Fan;
     if (existed) {
-      this.map.set(key, mergeFan(this.map.get(key)!, fan));
+      stored = mergeFan(this.map.get(key)!, fan);
     } else {
-      this.map.set(key, fan);
+      stored = { ...fan };
+      if (now !== undefined && stored.firstSeenAt === undefined) stored.firstSeenAt = now;
+    }
+    if (now !== undefined) stored.lastUpdatedAt = now;
+    this.map.set(key, stored);
+    // 增量维护 top —— O(1)，避免每次 broadcast 排序全表
+    if (!this.topFan || stored.followerCount > this.topFan.followerCount) {
+      this.topFan = stored;
+    } else if (this.topFan && dedupKey(this.topFan) === key) {
+      this.topFan = stored; // 同一人更新
     }
     return !existed;
   }
 
   /** 批量加入，返回新增的粉丝数组（便于增量持久化） */
-  upsertManyReturningNew(fans: Fan[]): Fan[] {
+  upsertManyReturningNew(fans: Fan[], now?: number): Fan[] {
     const added: Fan[] = [];
     for (const f of fans) {
-      if (this.upsert(f)) added.push(f);
+      if (this.upsert(f, now)) added.push(f);
     }
     return added;
   }
 
   /** 批量加入，返回本批新增数量 */
-  upsertMany(fans: Fan[]): number {
-    return this.upsertManyReturningNew(fans).length;
+  upsertMany(fans: Fan[], now?: number): number {
+    return this.upsertManyReturningNew(fans, now).length;
+  }
+
+  has(fan: Fan): boolean {
+    return this.map.has(dedupKey(fan));
+  }
+
+  /** 取当前存储的合并后版本（用于增量持久化更新的字段） */
+  getStored(fan: Fan): Fan | undefined {
+    return this.map.get(dedupKey(fan));
   }
 
   values(): Fan[] {
     return [...this.map.values()];
   }
 
+  /** 仅在导出时调用（Full/Incremental 结束后一次），不在扫描热路径 */
   sorted(): Fan[] {
     return sortFans(this.values());
   }
 
+  /** O(1)：返回增量维护的粉丝数最高者 */
   top(): Fan | undefined {
-    return this.sorted()[0];
+    return this.topFan;
   }
 }

@@ -23,10 +23,11 @@ describe('Excel 生成', () => {
     expect(name).toBe('抖音粉丝排行榜_2026-08-28_09-05.xlsx');
   });
 
-  it('包含两个 sheet：粉丝排行榜 / 数据概览', async () => {
+  it('包含三个 sheet：粉丝排行榜 / 扫描概览 / 粉丝分层', async () => {
     const wb = await loadBack();
     expect(wb.getWorksheet('粉丝排行榜')).toBeTruthy();
-    expect(wb.getWorksheet('数据概览')).toBeTruthy();
+    expect(wb.getWorksheet('扫描概览')).toBeTruthy();
+    expect(wb.getWorksheet('粉丝分层')).toBeTruthy();
   });
 
   it('按 followerCount 降序，排名列正确', async () => {
@@ -48,10 +49,10 @@ describe('Excel 生成', () => {
     expect(cell.numFmt).toContain('#,##0');
   });
 
-  it('主页是超链接', async () => {
+  it('主页是超链接（第 7 列 G）', async () => {
     const wb = await loadBack();
     const ws = wb.getWorksheet('粉丝排行榜')!;
-    const cell = ws.getCell('H2').value as { hyperlink?: string };
+    const cell = ws.getCell('G2').value as { hyperlink?: string };
     expect(cell.hyperlink).toBe('https://www.douyin.com/user/MS4_big');
   });
 
@@ -64,17 +65,23 @@ describe('Excel 生成', () => {
     expect(ws.autoFilter).toBeTruthy();
   });
 
-  it('概览 sheet 含总量与分桶数字', async () => {
+  it('概览 sheet 含主页显示粉丝', async () => {
     const wb = await loadBack();
-    const ws = wb.getWorksheet('数据概览')!;
-    // 找到“总粉丝数量”所在行
+    const ws = wb.getWorksheet('扫描概览')!;
     let found = false;
     ws.eachRow((row) => {
-      if (row.getCell(1).value === '总粉丝数量') {
+      if (row.getCell(1).value === '主页显示粉丝') {
         expect(row.getCell(2).value).toBe(14570);
         found = true;
       }
     });
     expect(found).toBe(true);
+  });
+
+  it('分层 sheet 含占比列', async () => {
+    const wb = await loadBack();
+    const ws = wb.getWorksheet('粉丝分层')!;
+    const head = ws.getRow(1);
+    expect(head.getCell(3).value).toBe('占比');
   });
 });

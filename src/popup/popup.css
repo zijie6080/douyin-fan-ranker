@@ -47,6 +47,9 @@ h1 { font-size: 16px; margin: 0 0 10px; }
 
 .message { font-size: 12px; margin-top: 10px; padding: 8px; border-radius: 8px; background: #fff7ed; color: #9a3412; }
 
+.adv { margin-top: 10px; }
+.adv summary { font-size: 12px; color: var(--muted); cursor: pointer; padding: 4px 0; }
+.adv .btn { margin-top: 6px; }
 .diag { margin-top: 12px; padding: 10px; border-radius: 8px; background: var(--track); }
 .diag-title { font-weight: 700; margin-bottom: 6px; }
 .diag-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }

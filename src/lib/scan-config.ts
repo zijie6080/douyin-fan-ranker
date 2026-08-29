@@ -8,6 +8,26 @@ export const SCAN_CONFIG = {
   /** 每次滚轮的 deltaY（像素）。虚拟列表下适当大一点，一次不至于过分 */
   WHEEL_DELTA: 1200,
 
+  // ------- V2 网络驱动 / 自适应滚轮 -------
+  /** 默认滚轮幅度（自适应下限） */
+  WHEEL_DELTA_DEFAULT: 1600,
+  /** 连续两次滚轮未触发请求后提高到的幅度 */
+  WHEEL_DELTA_BOOST: 2600,
+  /** 处理完一页响应后、发下一次滚轮前的极短稳定等待（毫秒） */
+  STABILIZE_MS: 160,
+  /** 发出滚轮后、等待“下一个 follower/list 请求出现”的快速退避序列（毫秒） */
+  REQUEST_WAIT_BACKOFF_MS: [150, 200, 300, 500, 800],
+  /** 触发下一页请求后、等待其响应被解析的最长时间（毫秒） */
+  REQUEST_RESPONSE_WAIT_MS: 4000,
+  /** 连续多少轮都没能触发新请求就判定前端停止/到底 */
+  NO_REQUEST_GIVEUP_ROUNDS: 6,
+
+  /** 性能测试模式的收集上限（unique fans），到达即停并出报告 */
+  PERF_TEST_LIMIT: 3000,
+
+  /** UI 广播最小间隔（毫秒）——popup 退出热路径，最多 1s 刷新一次 */
+  BROADCAST_MIN_INTERVAL_MS: 1000,
+
   /** 两次滚轮之间的最小节流（毫秒）——避免疯狂滚动，但足够快 */
   WHEEL_MIN_INTERVAL_MS: 250,
 
